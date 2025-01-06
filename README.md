@@ -154,16 +154,27 @@ train_dataset = MemoryEfficientPlantDataset(
 )
 ```
 
-### Training Configuration
-- Single GPU training
-- Gradient accumulation steps: 1024
-- Learning rate: 1e-4
-- Batch size: 1 (effective batch size = 1024)
-- Mixed precision: Disabled
-- Gradient checkpointing: Enabled
+## Training Configuration
 
-## Future Improvements
-- Support for multi-GPU training
-- Advanced data augmentation
-- More flexible image processing
-- Enhanced error recovery mechanisms
+### Hardware and Optimization
+- Training Platform: CPU (M2 Mac)
+- Gradient Accumulation Steps: 1
+- Effective Batch Size: 1
+- Learning Rate: 1e-5 (adjusted from previous 1e-4)
+
+### Model Optimization Techniques
+- Mixed Precision: Disabled
+- Gradient Checkpointing: Enabled
+- Precision: Float32
+- Quantization: None
+
+### Performance Considerations
+- Memory-efficient approach
+- Reduced learning rate for stability
+- Fallback to CPU training
+- Minimal batch size to manage memory constraints
+
+### Potential Future Improvements
+- Explore 8-bit quantization
+- Investigate smaller model variants
+- Optimize for limited computational resources

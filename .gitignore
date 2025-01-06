@@ -5,4 +5,4 @@ __pycache__/
 *.log
 .env
 venv/
-conda_env/
+conda_env/.DS_Store

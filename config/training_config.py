@@ -8,32 +8,44 @@ from typing import Optional
 class ModelConfig:
     name: str = "llava-hf/llava-v1.6-mistral-7b-hf"
     image_size: int = 336
-    dtype: str = "float16"
-    device_map: str = "cpu"
+    dtype: str = "float32"  # Changed from float16
+    device_map: str = "cpu"  # Fallback to CPU
     trust_remote_code: bool = True
 
 def get_training_args(model_dir: str) -> TrainingArguments:
     return TrainingArguments(
         output_dir=model_dir,
-        num_train_epochs=1,
+        
+        # Further reduce memory usage
         per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
-        gradient_accumulation_steps=1024,
-        learning_rate=1e-4,
-        weight_decay=0.01,
-        warmup_ratio=0.1,
-        logging_dir=os.path.join(model_dir, "logs"),
-        logging_steps=10,
-        eval_strategy="steps",
-        eval_steps=100,
-        save_strategy="steps",
-        save_steps=100,
-        load_best_model_at_end=True,
+        gradient_accumulation_steps=4,  # Accumulate gradients instead of processing larger batches
+        
+        # Memory optimizations
+        gradient_checkpointing=True,
+        max_grad_norm=0.5,
+        
+        # Reduce memory pressure
+        max_steps=10,  # Limit training steps for testing
+        save_steps=5,
+        eval_steps=5,
+        logging_steps=1,
+        
+        # Disable features that consume memory
+        report_to="none",
         push_to_hub=False,
+        
+        # Learning rate settings
+        learning_rate=5e-6,  # Lower learning rate
+        warmup_ratio=0.05,
+        
+        # Memory optimizations
         fp16=False,
         bf16=False,
+        dataloader_num_workers=0,
+        dataloader_pin_memory=False,  # Set pin memory here
+        
+        # Add these memory-saving options
+        deepspeed=None,
         optim="adamw_torch",
-        gradient_checkpointing=True,
-        max_grad_norm=1.0,
-        dataloader_num_workers=0
+        torch_compile=False,  # Disable torch compilation
     )

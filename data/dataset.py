@@ -1,174 +1,114 @@
+# data/dataset.py
 import torch
 import logging
 import traceback
 from torch.utils.data import Dataset
+from utils.image_utils import validate_image_data, convert_to_pil_image, process_pil_image  # Add these imports
 from datasets import load_dataset
+import os
+import gc  # Add garbage collector
 
-from utils.image_utils import validate_image_data, convert_to_pil_image, process_pil_image
-from utils.tensor_utils import fix_pixel_values_shape, validate_processed_sample
+# Set MPS memory limit
+os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
 
 logger = logging.getLogger(__name__)
-
-def memory_efficient_collate_fn(batch):
-    """
-    Custom collate function that handles None values and validates batch
-    
-    Args:
-        batch: List of processed samples
-    
-    Returns:
-        Collated batch or None
-    """
-    # Filter out None values
-    batch = [item for item in batch if item is not None]
-    
-    if not batch:
-        logger.warning("No valid items in the batch")
-        return None
-    
-    try:
-        # Combine pixel values
-        pixel_values = torch.stack([item['pixel_values'].squeeze(0) for item in batch])
-        
-        # Combine input ids
-        input_ids = torch.stack([item['input_ids'].squeeze(0) for item in batch])
-        
-        # Combine attention mask
-        attention_mask = torch.stack([item['attention_mask'].squeeze(0) for item in batch])
-        
-        # Combine labels
-        labels = torch.stack([item['labels'] for item in batch])
-        
-        return {
-            'pixel_values': pixel_values,
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
-            'labels': labels
-        }
-    
-    except Exception as e:
-        logger.error(f"Batch collation error: {e}")
-        logger.error(f"Batch processing failed. Details: {traceback.format_exc()}")
-        return None
 
 class MemoryEfficientPlantDataset(Dataset):
     def __init__(self, processor, split="train", sample_fraction=0.1, image_size=336):
         """
         Initialize the dataset with memory-efficient loading
-        
-        Args:
-            processor: LLaVA processor for image and text processing
-            split: Dataset split to use (train/test)
-            sample_fraction: Fraction of dataset to load
-            image_size: Target image size for processing
         """
         logger.info(f"Loading {split} dataset...")
         
-        # Load full dataset
-        full_dataset = load_dataset("nelorth/oxford-flowers", split=split, trust_remote_code=True)
+        # Load feature info first (non-streaming)
+        temp_dataset = load_dataset(
+            "nelorth/oxford-flowers",
+            split=split,
+            trust_remote_code=True
+        )
+        # Store categories
+        self.categories = {
+            i: name for i, name in enumerate(temp_dataset.features['label'].names)
+        }
+        del temp_dataset
         
-        # Select a fraction of the dataset
-        num_samples = max(10, int(len(full_dataset) * sample_fraction))
-        self.dataset = full_dataset.select(range(num_samples))
+        # Now load the actual dataset in streaming mode
+        self.dataset = load_dataset(
+            "nelorth/oxford-flowers",
+            split=split,
+            streaming=True  # Enable streaming mode
+        )
         
-        # Store processor and configuration
+        # Convert to list but limit size
+        self.dataset = list(self.dataset.take(int(102 * sample_fraction)))  # Oxford flowers has 102 classes
+        
         self.processor = processor
         self.image_size = image_size
         logger.debug(f"Using image size: {self.image_size}")
         
-        # Extract category names
-        self.categories = {
-            i: name for i, name in enumerate(self.dataset.features['label'].names)
-        }
-        
         logger.info(f"Loaded {len(self.dataset)} images for {split}")
         logger.info(f"Found {len(self.categories)} plant categories")
 
-    def __len__(self):
-        """
-        Return the number of samples in the dataset
-        
-        Returns:
-            int: Number of samples
-        """
-        return len(self.dataset)
-
     def __getitem__(self, idx):
         """
-        Retrieve and process a single sample
-        
-        Args:
-            idx: Index of the sample to retrieve
-        
-        Returns:
-            Processed sample or None if processing fails
+        Memory-efficient item retrieval
         """
         try:
-            # Retrieve original item
+            # Clear any cached tensors
+            torch.cuda.empty_cache() if torch.cuda.is_available() else gc.collect()
+            
             item = self.dataset[idx]
             logger.debug(f"Processing item {idx}")
             
-            # Validate and process image
-            if not validate_image_data(item['image'], idx):
-                logger.warning(f"Image validation failed for index {idx}")
-                return None
-                
-            image = convert_to_pil_image(item['image'], idx)
-            if image is None:
-                logger.warning(f"Image conversion failed for index {idx}")
-                return None
-                
-            image = process_pil_image(image, self.image_size, idx)
-            if image is None:
-                logger.warning(f"Image processing failed for index {idx}")
-                return None
-            
-            # Get label information
-            label_idx = item['label']
-            label = self.categories[label_idx]
-            logger.debug(f"Label index: {label_idx}, category: {label}")
-            
-            prompt = f"Identify this {label} flower."
-            
+            # Process image with memory optimization
             try:
-                # Specific processing for LLaVA v1.6
-                image_inputs = self.processor.image_processor(
-                    image, 
-                    return_tensors="pt",
-                    do_resize=True,
-                    size=self.image_size,
-                    do_center_crop=True,
-                    do_normalize=True,
-                    do_convert_rgb=True
-                )
-                
-                text_inputs = self.processor.tokenizer(
-                    f"[INST] {prompt} [/INST]",
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=128
-                )
-                
-                # Combine inputs
-                processed = {
-                    'pixel_values': image_inputs['pixel_values'],
-                    'input_ids': text_inputs['input_ids'],
-                    'attention_mask': text_inputs['attention_mask']
-                }
-                
-                # Validate and standardize processed sample
-                validated_sample = validate_processed_sample(processed, self.image_size)
-                
-                if validated_sample is None:
-                    logger.warning(f"Invalid processed sample at index {idx}")
+                # Convert image and process in one step
+                image = convert_to_pil_image(item['image'], idx)
+                if image is None:
                     return None
                 
-                # Add labels to the sample
-                validated_sample['labels'] = torch.tensor([label_idx])
-                
-                return validated_sample
-                
+                # Process image with memory constraints
+                with torch.no_grad():  # Disable gradient tracking
+                    image_inputs = self.processor.image_processor(
+                        image,
+                        return_tensors="pt",
+                        do_resize=True,
+                        size=self.image_size,
+                        do_center_crop=True,
+                        do_normalize=True,
+                        do_convert_rgb=True
+                    )
+                    
+                    # Free up memory
+                    del image
+                    gc.collect()
+                    
+                    # Process text efficiently
+                    label_idx = item['label']
+                    prompt = f"Identify this {self.categories[label_idx]} flower."
+                    
+                    text_inputs = self.processor.tokenizer(
+                        f"[INST] {prompt} [/INST]",
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=128
+                    )
+                    
+                    # Combine inputs with memory optimization
+                    processed = {
+                        'pixel_values': image_inputs['pixel_values'].detach(),  # Detach to free memory
+                        'input_ids': text_inputs['input_ids'].detach(),
+                        'attention_mask': text_inputs['attention_mask'].detach(),
+                        'labels': torch.tensor([label_idx])
+                    }
+                    
+                    # Clean up intermediate tensors
+                    del image_inputs, text_inputs
+                    gc.collect()
+                    
+                    return processed
+                    
             except Exception as proc_error:
                 logger.error(f"Processor failed for index {idx}: {proc_error}")
                 logger.error(f"Processor error traceback: {traceback.format_exc()}")
@@ -178,3 +118,38 @@ class MemoryEfficientPlantDataset(Dataset):
             logger.error(f"Sample processing failed for index {idx}: {e}")
             logger.error(f"Error traceback: {traceback.format_exc()}")
             return None
+
+    def __len__(self):
+        return len(self.dataset)
+
+def memory_efficient_collate_fn(batch):
+    """
+    Memory-efficient collate function
+    """
+    try:
+        # Clear cache before batch processing
+        torch.cuda.empty_cache() if torch.cuda.is_available() else gc.collect()
+        
+        # Filter None values
+        batch = [item for item in batch if item is not None]
+        
+        if not batch:
+            return None
+            
+        # Process tensors with memory optimization
+        with torch.no_grad():
+            result = {
+                key: torch.stack([item[key] for item in batch]).detach()
+                for key in batch[0].keys()
+            }
+            
+            # Clean up
+            del batch
+            gc.collect()
+            
+            return result
+            
+    except Exception as e:
+        logger.error(f"Batch collation error: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return None

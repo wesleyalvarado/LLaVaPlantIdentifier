@@ -1,0 +1,8 @@
+# Python .gitignore
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+.env
+venv/
+conda_env/

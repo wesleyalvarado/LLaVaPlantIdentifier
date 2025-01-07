@@ -14,13 +14,13 @@ class ModelConfig:
     trust_remote_code: bool = True
 
 def get_training_args(model_dir: str) -> TrainingArguments:
-    # Dynamically determine training device
-    if torch.backends.mps.is_available():
+    # Determine the appropriate device
+    if torch.cuda.is_available():
+        print("CUDA device is available. Using CUDA.")
+    elif torch.backends.mps.is_available():
         print("MPS device is available. Using MPS.")
-        device = "mps"
     else:
-        print("MPS device not available. Falling back to CPU.")
-        device = "cpu"
+        print("No GPU available. Falling back to CPU.")
 
     return TrainingArguments(
         output_dir=model_dir,
@@ -47,8 +47,7 @@ def get_training_args(model_dir: str) -> TrainingArguments:
         learning_rate=1e-5,
         warmup_ratio=0.1,
         
-        # Dynamic device selection
-        device=device,
+        # Precision settings
         fp16=False,
         bf16=False,
         

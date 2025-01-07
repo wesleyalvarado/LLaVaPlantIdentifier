@@ -11,7 +11,6 @@ class ModelConfig:
     image_size: int = 224
     dtype: str = "float32"
     device_map: str = "auto"
-    trust_remote_code: bool = True
 
 def get_training_args(model_dir: str) -> TrainingArguments:
     # Determine the appropriate device
@@ -55,7 +54,6 @@ def get_training_args(model_dir: str) -> TrainingArguments:
         dataloader_num_workers=0,
         dataloader_pin_memory=False,
         
-        deepspeed=None,
         optim="adamw_torch",
         torch_compile=False,
 

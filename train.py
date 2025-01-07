@@ -100,16 +100,15 @@ def train_llava_model():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
+        device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
         # Load model with memory optimizations
         model = LlavaNextForConditionalGeneration.from_pretrained(
             model_config.name,
             config=config,
             torch_dtype=getattr(torch, model_config.dtype),
             low_cpu_mem_usage=True,
-            device_map=model_config.device_map,
-            trust_remote_code=model_config.trust_remote_code,
-            max_memory={0: "18GB"},  # Explicit memory limit
-            offload_folder=offload_dir
+            device_map={'': device},  # Map to MPS device
+            trust_remote_code=model_config.trust_remote_code
         )
         
         # Verify model components

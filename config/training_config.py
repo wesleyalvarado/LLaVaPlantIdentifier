@@ -7,7 +7,7 @@ from typing import Optional
 @dataclass
 class ModelConfig:
     name: str = "llava-hf/llava-v1.6-mistral-7b-hf"
-    image_size: int = 336
+    image_size: int = 224
     dtype: str = "float32"  # Changed from float16
     device_map: str = "cpu"  # Fallback to CPU
     trust_remote_code: bool = True
@@ -48,4 +48,7 @@ def get_training_args(model_dir: str) -> TrainingArguments:
         deepspeed=None,
         optim="adamw_torch",
         torch_compile=False,  # Disable torch compilation
+
+
+        use_mps_device=True  # Enable MPS for M2 Mac
     )

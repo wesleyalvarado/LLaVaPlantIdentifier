@@ -10,6 +10,7 @@ class ModelConfig:
     name: str = "llava-hf/llava-v1.6-mistral-7b-hf"
     image_size: int = 224
     dtype: str = "float16"
+    trust_remote_code: bool = True  # Added trust_remote_code attribute
 
 def get_training_args(model_dir: str) -> TrainingArguments:
     return TrainingArguments(

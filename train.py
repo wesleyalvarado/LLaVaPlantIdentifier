@@ -94,7 +94,8 @@ def train_llava_model():
         
         # Load processor
         processor = LlavaNextProcessor.from_pretrained(
-            model_config.name
+            model_config.name,
+            trust_remote_code=model_config.trust_remote_code
         )
         
         # Load model configuration and check components

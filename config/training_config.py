@@ -9,8 +9,10 @@ from typing import Optional
 class ModelConfig:
     name: str = "llava-hf/llava-v1.6-mistral-7b-hf"
     image_size: int = 224
-    dtype: str = "float16"
-    trust_remote_code: bool = True  # Added trust_remote_code attribute
+    dtype: str = "float32"
+    device_map: str = "auto"  # For model loading
+    trust_remote_code: bool = True  # For model loading
+    low_cpu_mem_usage: bool = True  # For model loading
 
 def get_training_args(model_dir: str) -> TrainingArguments:
     return TrainingArguments(
@@ -30,5 +32,5 @@ def get_training_args(model_dir: str) -> TrainingArguments:
         dataloader_pin_memory=False,
         optim="adamw_torch",
         torch_compile=False,
-        disable_tqdm=True,
+        disable_tqdm=False  # Show progress bars
     )

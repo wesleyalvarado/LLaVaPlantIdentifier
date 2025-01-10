@@ -81,16 +81,25 @@ def train_llava_model():
         model_config = ModelConfig()
         logger.info(f"Loading model: {model_config.name}")
         
+        # Determine device
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+            logger.info("Using CUDA device")
+        elif torch.backends.mps.is_available():
+            device = torch.device('mps')
+            logger.info("Using MPS device")
+        else:
+            device = torch.device('cpu')
+            logger.info("Using CPU device")
+        
         # Load processor
         processor = LlavaNextProcessor.from_pretrained(
-            model_config.name,
-            trust_remote_code=model_config.trust_remote_code
+            model_config.name
         )
         
         # Load model configuration and check components
         config = AutoConfig.from_pretrained(
-            model_config.name,
-            trust_remote_code=model_config.trust_remote_code
+            model_config.name
         )
         logger.debug(f"Vision config: {config.vision_config}")
         logger.debug(f"Text config: {config.text_config}")
@@ -100,16 +109,16 @@ def train_llava_model():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
         # Load model with memory optimizations
         model = LlavaNextForConditionalGeneration.from_pretrained(
             model_config.name,
             config=config,
             torch_dtype=getattr(torch, model_config.dtype),
-            low_cpu_mem_usage=True,
-            device_map={'': device},  # Map to MPS device
-            trust_remote_code=model_config.trust_remote_code
+            low_cpu_mem_usage=True
         )
+        
+        # Move model to the appropriate device
+        model = model.to(device)
         
         # Verify model components
         if not hasattr(model, 'vision_model') and not hasattr(model, 'vision_tower'):
@@ -121,14 +130,13 @@ def train_llava_model():
             param.requires_grad = False
         
         if hasattr(model, 'language_model'):
-        # For Mistral, unfreeze the final layers of the language model
+            # For Mistral, unfreeze the final layers of the language model
             for name, param in model.language_model.named_parameters():
-        # Unfreeze only the final layers
+                # Unfreeze only the final layers
                 if any(layer_name in name for layer_name in ['layer.31', 'norm']):
                     param.requires_grad = True
                     logger.debug(f"Unfrozen parameter: {name}")
 
-        
         # Log parameter status
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -185,7 +193,7 @@ def train_llava_model():
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             data_collator=memory_efficient_collate_fn
-            )
+        )
         
         # Start training
         logger.info("Beginning model training...")

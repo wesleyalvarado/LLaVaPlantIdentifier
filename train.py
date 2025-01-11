@@ -3,8 +3,8 @@ import gc
 import torch
 import traceback
 from transformers import (
-    LlavaNextProcessor,
-    LlavaNextForConditionalGeneration,
+    AutoModelForCausalLM,
+    AutoProcessor,
     AutoConfig
 )
 import logging
@@ -14,50 +14,11 @@ from torch.utils.data import DataLoader
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
 
-from data.dataset import MemoryEfficientPlantDataset, memory_efficient_collate_fn
+# Import local modules
+from data.dataset import MemoryEfficientPlantDataset, test_dataset
 from models.trainer import CustomTrainer
 from config.training_config import get_training_args, ModelConfig
 from utils.logging_utils import setup_logging
-
-def validate_dataset(dataset, processor, logger, max_samples_to_check=10):
-    """
-    Validate dataset processing by attempting to process a subset of samples
-    """
-    logger.info(f"Validating dataset processing for {max_samples_to_check} samples...")
-    
-    # Create a DataLoader to test batch processing
-    dataloader = DataLoader(
-        dataset, 
-        batch_size=1,  # Small batch size for detailed error tracking
-        collate_fn=memory_efficient_collate_fn,
-        num_workers=0,  # Disable multiprocessing for debugging
-        pin_memory=False  # Disable pin memory for lower memory usage
-    )
-    
-    successful_samples = 0
-    failed_samples = []
-    
-    for idx, batch in enumerate(dataloader):
-        if idx >= max_samples_to_check:
-            break
-            
-        if batch is None:
-            failed_samples.append(idx)
-            logger.warning(f"Failed to process sample {idx}")
-        else:
-            successful_samples += 1
-    
-    success_rate = (successful_samples / (successful_samples + len(failed_samples))) * 100
-    logger.info(f"Dataset validation results:")
-    logger.info(f"  Successful samples: {successful_samples}")
-    logger.info(f"  Failed samples: {len(failed_samples)}")
-    logger.info(f"  Success rate: {success_rate:.2f}%")
-    
-    if success_rate < 50:
-        logger.error("Low dataset processing success rate. Check image preprocessing.")
-        raise ValueError("Dataset processing failed for too many samples")
-    
-    return successful_samples, failed_samples
 
 def train_llava_model():
     """Main training function with enhanced error handling and dataset validation"""
@@ -75,81 +36,38 @@ def train_llava_model():
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            torch.cuda.reset_max_memory_allocated()
         
         # Load configurations
         model_config = ModelConfig()
         logger.info(f"Loading model: {model_config.name}")
         
         # Determine device
-        if torch.cuda.is_available():
-            device = torch.device('cuda')
-            logger.info("Using CUDA device")
-        elif torch.backends.mps.is_available():
-            device = torch.device('mps')
-            logger.info("Using MPS device")
-        else:
-            device = torch.device('cpu')
-            logger.info("Using CPU device")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        logger.info(f"Using device: {device}")
         
         # Load processor
-        processor = LlavaNextProcessor.from_pretrained(
+        processor = AutoProcessor.from_pretrained(
             model_config.name,
-            trust_remote_code=model_config.trust_remote_code
+            trust_remote_code=True
         )
         
-        # Load model configuration and check components
+        # Load model configuration
         config = AutoConfig.from_pretrained(
-            model_config.name
+            model_config.name,
+            trust_remote_code=True
         )
-        logger.debug(f"Vision config: {config.vision_config}")
-        logger.debug(f"Text config: {config.text_config}")
         
-        # Memory cleanup before model loading
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        # Load model with memory optimizations
-        model = LlavaNextForConditionalGeneration.from_pretrained(
+        # Load model
+        model = AutoModelForCausalLM.from_pretrained(
             model_config.name,
             config=config,
             torch_dtype=getattr(torch, model_config.dtype),
+            device_map=model_config.device_map,
+            trust_remote_code=True,
             low_cpu_mem_usage=True
         )
         
-        # Move model to the appropriate device
-        model = model.to(device)
-        
-        # Verify model components
-        if not hasattr(model, 'vision_model') and not hasattr(model, 'vision_tower'):
-            logger.error("Vision components not found")
-            raise ValueError("Vision model components missing")
-        
-        # Selective parameter freezing
-        for param in model.parameters():
-            param.requires_grad = False
-        
-        if hasattr(model, 'language_model'):
-            # For Mistral, unfreeze the final layers of the language model
-            for name, param in model.language_model.named_parameters():
-                # Unfreeze only the final layers
-                if any(layer_name in name for layer_name in ['layer.31', 'norm']):
-                    param.requires_grad = True
-                    logger.debug(f"Unfrozen parameter: {name}")
-
-        # Log parameter status
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"Total parameters: {total_params:,}")
-        logger.info(f"Trainable parameters: {trainable_params:,}")
-        
-        # Memory cleanup before dataset loading
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        # Prepare datasets with comprehensive validation
+        # Prepare datasets
         train_dataset = MemoryEfficientPlantDataset(
             processor=processor,
             split="train",
@@ -164,46 +82,18 @@ def train_llava_model():
             image_size=model_config.image_size
         )
         
-        # Validate datasets before training
-        logger.info("Validating train dataset...")
-        train_successful, train_failed = validate_dataset(
-            train_dataset, 
-            processor, 
-            logger,
-            max_samples_to_check=10
-        )
-        
-        logger.info("Validating eval dataset...")
-        eval_successful, eval_failed = validate_dataset(
-            eval_dataset, 
-            processor, 
-            logger,
-            max_samples_to_check=5
-        )
-        
-        # Memory cleanup before training
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        # Initialize trainer with memory optimizations
+        # Initialize trainer
         training_args = get_training_args(model_dir)
         trainer = CustomTrainer(
             model=model,
             args=training_args,
             train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            data_collator=memory_efficient_collate_fn
+            eval_dataset=eval_dataset
         )
         
         # Start training
         logger.info("Beginning model training...")
         trainer.train()
-        
-        # Memory cleanup before saving
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
         
         # Save final model
         final_output_dir = os.path.join(model_dir, "final")
@@ -217,12 +107,6 @@ def train_llava_model():
         logger.error(f"Training failed: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise
-    finally:
-        # Final cleanup
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.reset_max_memory_allocated()
 
 if __name__ == "__main__":
     train_llava_model()

@@ -29,7 +29,12 @@ class CustomTrainer:
                 for step, inputs in enumerate(train_dataloader):
                     if inputs is None:
                         continue
-                        
+                    
+                    inputs = {
+                        k: v for k, v in inputs.items()
+                        if k in ['pixel_values', 'input_ids', 'attention_mask', 'labels']  # Adjust keys as needed
+                }
+
                     loss = self.training_step(self.model, inputs)
                     
                     if (step + 1) % self.args.gradient_accumulation_steps == 0:
@@ -63,12 +68,15 @@ class CustomTrainer:
             # Set model to training mode
             model.train()
             
+
             # Move inputs to device
             model_inputs = {
                 k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
                 for k, v in inputs.items()
                 if k in ['pixel_values', 'input_ids', 'attention_mask', 'labels']
             }
+
+            logger.debug(f"Model inputs: {model_inputs.keys()}")
             
             # Forward pass
             outputs = model(**model_inputs)

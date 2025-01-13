@@ -59,40 +59,63 @@ class CustomTrainer:
             raise
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
-        """Perform a training step"""
         try:
-            # Memory tracking
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                
             # Set model to training mode
             model.train()
             
-
-            # Move inputs to device
+            # Filter inputs for model
             model_inputs = {
                 k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
                 for k, v in inputs.items()
                 if k in ['pixel_values', 'input_ids', 'attention_mask', 'labels']
             }
-
-            logger.debug(f"Model inputs: {model_inputs.keys()}")
+            
+            # Handle image processing
+            if 'pixel_values' in model_inputs:
+                pixel_values = model_inputs['pixel_values']
+                
+                # CLIP model expects [batch_size, channels, height, width]
+                if len(pixel_values.shape) == 3:  # [C, H, W]
+                    pixel_values = pixel_values.unsqueeze(0)  # [1, C, H, W]
+                
+                # Calculate patches
+                patch_size = 14  # CLIP's patch size
+                height, width = pixel_values.shape[2:]
+                num_patches_h = height // patch_size
+                num_patches_w = width // patch_size
+                num_patches = num_patches_h * num_patches_w
+                
+                model_inputs['pixel_values'] = pixel_values.contiguous()
+                model_inputs['image_sizes'] = [(height, width)]
+                
+                logger.info(f"Image shape: {pixel_values.shape}")
+                logger.info(f"Number of patches (H x W): {num_patches_h} x {num_patches_w} = {num_patches}")
+                
+                # Debug visualization
+                logger.info(f"Patch calculation:")
+                logger.info(f"  Height: {height} / {patch_size} = {num_patches_h} patches")
+                logger.info(f"  Width: {width} / {patch_size} = {num_patches_w} patches")
+                logger.info(f"  Total patches: {num_patches}")
+            
+            # Add batch dimension to other tensors
+            for k in ['input_ids', 'attention_mask', 'labels']:
+                if k in model_inputs and len(model_inputs[k].shape) == 1:
+                    model_inputs[k] = model_inputs[k].unsqueeze(0)
             
             # Forward pass
             outputs = model(**model_inputs)
             loss = outputs.loss
             
-            # Scale loss for gradient accumulation
             if self.args.gradient_accumulation_steps > 1:
                 loss = loss / self.args.gradient_accumulation_steps
             
-            # Backward pass
             loss.backward()
-            
             return loss.detach()
             
         except Exception as e:
             logger.error(f"Error in training step: {str(e)}")
+            logger.error(f"Image shape: {pixel_values.shape if 'pixel_values' in locals() else 'not available'}")
+            logger.error(f"Model inputs: {[(k, v.shape) if torch.is_tensor(v) else (k, v) for k, v in model_inputs.items()]}")
             logger.error(traceback.format_exc())
             raise
 

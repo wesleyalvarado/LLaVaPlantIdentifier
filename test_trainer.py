@@ -1,4 +1,5 @@
 # test_trainer.py
+import os
 import torch
 import logging
 from models.trainer import CustomTrainer
@@ -14,12 +15,18 @@ logger = logging.getLogger(__name__)
 def test_single_batch():
     """Test processing a single batch through the trainer"""
     try:
-        # First authenticate with Hugging Face
-        token = "your_token_here"  # Replace with your token
+    # First authenticate with Hugging Face
+        token = os.getenv("HUGGINGFACE_TOKEN")  # Fetch token from environment variable
+        
+        if not token:
+            raise ValueError("HUGGINGFACE_TOKEN environment variable not set.")
+        
         login(token)
         
         logger.info("Loading processor...")
-        processor = AutoProcessor.from_pretrained("llava-hf/llava-v1.6-mistral-7b-hf")
+        processor = AutoProcessor.from_pretrained("llava-hf/llava-v1.6-mistral-7b-hf", use_auth_token=token)
+        
+        logger.info("Processor loaded successfully.")
         
         logger.info("Loading model...")
         model = LlavaNextForConditionalGeneration.from_pretrained(

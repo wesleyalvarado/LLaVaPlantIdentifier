@@ -3,12 +3,10 @@ import gc
 import torch
 import logging
 import traceback
-import models.trainer
-from models.trainer import CustomTrainer
 from huggingface_hub import login
+from models.trainer import CustomTrainer
 from transformers import (
     AutoProcessor,
-    AutoModel,
     LlavaNextForConditionalGeneration
 )
 from config.training_config import ModelConfig
@@ -29,7 +27,13 @@ def load_llava_model():
         # Setup logging
         setup_logging()
         logger = logging.getLogger(__name__)
-        
+
+        # Authenticate with Hugging Face
+        token = os.getenv("HUGGINGFACE_TOKEN")
+        if not token:
+            raise ValueError("HUGGINGFACE_TOKEN environment variable not set. Please set it before running.")
+        login(token=token)
+
         # Memory cleanup
         torch.cuda.empty_cache()
         gc.collect()

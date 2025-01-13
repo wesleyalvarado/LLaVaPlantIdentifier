@@ -1,7 +1,7 @@
 # LLaVA Plant Training Project Documentation
 
 ## Project Overview
-This project implements a training pipeline for fine-tuning a LLaVA (Large Language and Vision Assistant) model on the Oxford Flowers dataset for plant identification. The project is designed with memory efficiency as a primary consideration, particularly for systems with limited resources like M2 Macs.
+This project implements a training pipeline for fine-tuning a LLaVA (Large Language and Vision Assistant) model on the oxford_flowers102 dataset for plant identification. The project is designed with memory efficiency as a primary consideration, particularly for systems with limited resources like M2 Macs.
 
 ## Project Structure
 ```

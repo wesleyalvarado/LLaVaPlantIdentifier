@@ -33,7 +33,7 @@ class MemoryEfficientPlantDataset(Dataset):
             logger.info(f"Initializing {split} dataset...")
             
             # Initialize tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained("facebook/opt-350m")
+            self.tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
             
             # Load dataset first to get class names
             temp_dataset = load_dataset("nelorth/oxford-flowers", split=split)
@@ -55,7 +55,7 @@ class MemoryEfficientPlantDataset(Dataset):
             
             # Load subset of dataset
             self.dataset = load_dataset(
-                "nelorth/oxford-flowers",
+                "dpdl-benchmark/oxford_flowers102",
                 split=f"{split}[:{num_samples}]"
             )
             
@@ -95,17 +95,26 @@ class MemoryEfficientPlantDataset(Dataset):
             # Transform image
             image_tensor = self.transform(item['image'])
             
-            # Get flower name
-            label = item['label']
-            class_name = self.class_names[label]
+            # Get numerical label and class name
+            numerical_label = item['label']
+            class_name = str(self.class_names[numerical_label])  # Convert to string
             
             # Create text descriptions
             prompt = f"What type of flower is shown in this image? Please identify the flower species."
-            target = f"This image shows a {class_name}."
+            target = f"This image shows a flower of class {class_name}."
             
-            # Tokenize text
-            encoded = self.tokenizer(
+            # Tokenize prompt
+            encoded_prompt = self.tokenizer(
                 prompt,
+                padding='max_length',
+                truncation=True,
+                max_length=64,
+                return_tensors='pt'
+            )
+            
+            # Tokenize target for labels
+            label_encoding = self.tokenizer(
+                target,
                 padding='max_length',
                 truncation=True,
                 max_length=64,
@@ -114,9 +123,9 @@ class MemoryEfficientPlantDataset(Dataset):
             
             return {
                 'pixel_values': image_tensor,
-                'input_ids': encoded['input_ids'].squeeze(0),
-                'attention_mask': encoded['attention_mask'].squeeze(0),
-                'label': torch.tensor(label),
+                'input_ids': encoded_prompt['input_ids'].squeeze(0),
+                'attention_mask': encoded_prompt['attention_mask'].squeeze(0),
+                'labels': label_encoding['input_ids'].squeeze(0),  # This is what the trainer needs
                 'class_name': class_name,
                 'prompt': prompt,
                 'target': target
@@ -185,58 +194,3 @@ def create_dataloaders(
     except Exception as e:
         logger.error(f"Failed to create dataloaders: {e}")
         raise
-
-def test_dataset():
-    """Test the dataset implementation."""
-    try:
-        # Test dataset creation
-        print("\nTesting dataset creation...")
-        dataset = MemoryEfficientPlantDataset(
-            split="train",
-            sample_fraction=0.01  # Use small fraction for testing
-        )
-        
-        print(f"\nDataset size: {len(dataset)}")
-        
-        # Print some class names
-        print("\nSample flower categories:")
-        for i in range(min(5, len(dataset.class_names))):
-            print(f"Class {i}: {dataset.class_names[i]}")
-        
-        # Test single item
-        item = dataset[0]
-        print("\nSample item details:")
-        print(f"Class name: {item['class_name']}")
-        print(f"Prompt: {item['prompt']}")
-        print(f"Target: {item['target']}")
-        
-        print("\nTensor shapes:")
-        for k, v in item.items():
-            if isinstance(v, torch.Tensor):
-                print(f"- {k}: {v.shape}")
-        
-        # Test dataloader
-        print("\nTesting dataloader creation...")
-        train_loader, val_loader = create_dataloaders(
-            train_fraction=0.01,
-            batch_size=2
-        )
-        
-        print("\nDataloader sizes:")
-        print(f"Train batches: {len(train_loader)}")
-        print(f"Val batches: {len(val_loader)}")
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Dataset test failed: {e}")
-        import traceback
-        print(traceback.format_exc())
-        return False
-
-if __name__ == "__main__":
-    # Set up logging
-    logging.basicConfig(level=logging.INFO)
-    
-    # Run tests
-    test_dataset()

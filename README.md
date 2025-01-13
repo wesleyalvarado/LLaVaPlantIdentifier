@@ -1,7 +1,7 @@
 # LLaVA Plant Training Application Documentation
 
 ## Project Overview
-This application fine-tunes a LLaVA (Large Language and Vision Assistant) model on the Oxford Flowers dataset for plant identification. The project uses a memory-efficient approach to handle image processing, model training, and dataset management.
+This application fine-tunes a LLaVA (Large Language and Vision Assistant) model on the oxford_flowers102 dataset for plant identification. The project uses a memory-efficient approach to handle image processing, model training, and dataset management.
 
 ## Project Structure
 ```
@@ -26,7 +26,7 @@ llava_plants/
 ## Key Components
 
 ### Dataset Processing (`data/dataset.py`)
-- `MemoryEfficientPlantDataset`: Advanced dataset class for Oxford Flowers dataset
+- `MemoryEfficientPlantDataset`: Advanced dataset class for oxford_flowers102 dataset
   - Memory-efficient data loading with sample fraction support
   - Robust image validation and processing
   - Dynamic label handling

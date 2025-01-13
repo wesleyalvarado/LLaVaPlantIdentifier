@@ -108,40 +108,41 @@ class CustomTrainer:
             logger.error(traceback.format_exc())
             raise
 
-    def train(self):
-        """Main training loop"""
-        try:
-            train_dataloader = self.get_train_dataloader()
-            
-            self.model.zero_grad()
-            
-            for epoch in range(self.args.num_train_epochs):
-                for step, inputs in enumerate(train_dataloader):
-                    if inputs is None:
-                        continue
-                        
-                    loss = self.training_step(self.model, inputs)
+def train(self):
+    """Main training loop"""
+    try:
+        train_dataloader = self.get_train_dataloader()
+        
+        self.model.zero_grad()
+        
+        num_epochs = int(self.args.num_train_epochs)  # Convert to integer
+        for epoch in range(num_epochs):
+            for step, inputs in enumerate(train_dataloader):
+                if inputs is None:
+                    continue
                     
-                    if (step + 1) % self.args.gradient_accumulation_steps == 0:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), 
-                            self.args.max_grad_norm
-                        )
-                        self.model.zero_grad()
+                loss = self.training_step(self.model, inputs)
+                
+                if (step + 1) % self.args.gradient_accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), 
+                        self.args.max_grad_norm
+                    )
+                    self.model.zero_grad()
+                
+                if step % 10 == 0:
+                    logger.info(f"Epoch {epoch}, Step {step}, Loss: {loss.item():.4f}")
                     
-                    if step % 10 == 0:
-                        logger.info(f"Epoch {epoch}, Step {step}, Loss: {loss.item():.4f}")
-                        
-                    if self.args.max_steps > 0 and step >= self.args.max_steps:
-                        break
-                        
                 if self.args.max_steps > 0 and step >= self.args.max_steps:
                     break
                     
-        except Exception as e:
-            logger.error(f"Training failed: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
+            if self.args.max_steps > 0 and step >= self.args.max_steps:
+                break
+                
+    except Exception as e:
+        logger.error(f"Training failed: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
     def save_model(self, output_dir):
         """Save the model"""

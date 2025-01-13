@@ -30,7 +30,7 @@ def diagnose_dataset_processing():
     try:
         # Load dataset
         logger.info("Loading Oxford Flowers dataset...")
-        dataset = load_dataset("nelorth/oxford-flowers", split="train", trust_remote_code=True)
+        dataset = load_dataset("dpdl-benchmark/oxford_flowers102", split="train", trust_remote_code=True)
         
         # Prepare components
         model_name = "llava-hf/llava-v1.6-mistral-7b-hf"

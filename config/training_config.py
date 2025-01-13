@@ -25,6 +25,7 @@ def get_training_args(model_dir: str) -> TrainingArguments:
         save_steps=5,
         push_to_hub=False,
         learning_rate=1e-5,
+        num_train_epochs=3,  # Changed to integer
         warmup_ratio=0.1,
         fp16=True,  # Enable half-precision training
         bf16=False,

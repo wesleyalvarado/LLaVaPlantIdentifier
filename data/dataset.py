@@ -1,5 +1,4 @@
 # data/dataset.py
-
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
@@ -143,15 +142,20 @@ class MemoryEfficientPlantDataset(Dataset):
                 pad_to_multiple_of=8
             )
             
+            # Calculate image sizes for LLaVA-Next
+            height, width = image_tensor.shape[1:]
+            
             return {
-                'pixel_values': image_tensor,
+                'pixel_values': image_tensor,  # Shape: [3, H, W]
                 'input_ids': encoded_prompt['input_ids'].squeeze(0),
                 'attention_mask': encoded_prompt['attention_mask'].squeeze(0),
                 'labels': label_encoding['input_ids'].squeeze(0),
                 'class_name': class_name,
                 'numerical_label': numerical_label,
                 'prompt': prompt,
-                'target': target
+                'target': target,
+                'height': height,
+                'width': width
             }       
             
         except Exception as e:
@@ -179,6 +183,7 @@ def create_dataloaders(
         train_fraction: Fraction of data to use for training
         batch_size: Batch size for dataloaders
         num_workers: Number of workers for dataloaders
+        processor: Processor for tokenization
         
     Returns:
         Tuple of (train_dataloader, val_dataloader)
@@ -220,30 +225,3 @@ def create_dataloaders(
     except Exception as e:
         logger.error(f"Failed to create dataloaders: {e}")
         raise
-
-def test_dataset(split: str = "train", sample_fraction: float = 0.01):
-    """
-    Test dataset functionality
-    """
-    try:
-        dataset = MemoryEfficientPlantDataset(
-            split=split,
-            sample_fraction=sample_fraction
-        )
-        
-        # Test first item
-        first_item = dataset[0]
-        
-        # Print available keys and shapes
-        print("\nFirst item contents:")
-        for key, value in first_item.items():
-            if isinstance(value, torch.Tensor):
-                print(f"{key}: shape {value.shape}, dtype {value.dtype}")
-            else:
-                print(f"{key}: {value}")
-                
-        return True
-        
-    except Exception as e:
-        logger.error(f"Dataset testing failed: {e}")
-        return False

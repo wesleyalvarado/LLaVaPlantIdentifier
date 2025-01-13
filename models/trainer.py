@@ -1,4 +1,4 @@
-# trainer.py
+# models/trainer.py
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -17,24 +17,30 @@ class CustomTrainer:
         self.eval_dataset = eval_dataset
         self.device = next(model.parameters()).device
 
+        # Enable memory optimizations
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+
     def train(self):
         """Main training loop"""
         try:
             train_dataloader = self.get_train_dataloader()
-            
             self.model.zero_grad()
             
             num_epochs = int(self.args.num_train_epochs)
             for epoch in range(num_epochs):
                 for step, inputs in enumerate(train_dataloader):
+                    # Clear memory before each step
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+                    
                     if inputs is None:
                         continue
                     
-                    inputs = {
-                        k: v for k, v in inputs.items()
-                        if k in ['pixel_values', 'input_ids', 'attention_mask', 'labels']  # Adjust keys as needed
-                }
-
+                    inputs = {k: v for k, v in inputs.items()
+                             if k in ['pixel_values', 'input_ids', 'attention_mask', 'labels']}
+                    
                     loss = self.training_step(self.model, inputs)
                     
                     if (step + 1) % self.args.gradient_accumulation_steps == 0:
@@ -60,51 +66,51 @@ class CustomTrainer:
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
         try:
+            # Clear memory before processing
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            
             # Set model to training mode
             model.train()
             
-            # Filter inputs for model
-            model_inputs = {
-                k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
-                for k, v in inputs.items()
-                if k in ['pixel_values', 'input_ids', 'attention_mask', 'labels']
-            }
+            # Move inputs to device and handle image processing
+            model_inputs = {}
             
-            # Handle image processing
-            if 'pixel_values' in model_inputs:
-                pixel_values = model_inputs['pixel_values']
+            if 'pixel_values' in inputs:
+                pixel_values = inputs['pixel_values'].to(self.device)
+                # Add batch dimension if needed
+                if len(pixel_values.shape) == 3:
+                    pixel_values = pixel_values.unsqueeze(0)
                 
-                # CLIP model expects [batch_size, channels, height, width]
-                if len(pixel_values.shape) == 3:  # [C, H, W]
-                    pixel_values = pixel_values.unsqueeze(0)  # [1, C, H, W]
-                
-                # Calculate patches
-                patch_size = 14  # CLIP's patch size
-                height, width = pixel_values.shape[2:]
-                num_patches_h = height // patch_size
-                num_patches_w = width // patch_size
-                num_patches = num_patches_h * num_patches_w
-                
-                model_inputs['pixel_values'] = pixel_values.contiguous()
-                model_inputs['image_sizes'] = [(height, width)]
-                
-                logger.info(f"Image shape: {pixel_values.shape}")
-                logger.info(f"Number of patches (H x W): {num_patches_h} x {num_patches_w} = {num_patches}")
-                
-                # Debug visualization
-                logger.info(f"Patch calculation:")
-                logger.info(f"  Height: {height} / {patch_size} = {num_patches_h} patches")
-                logger.info(f"  Width: {width} / {patch_size} = {num_patches_w} patches")
-                logger.info(f"  Total patches: {num_patches}")
+                # Calculate image size information for LLaVA-Next
+                height, width = pixel_values.shape[-2:]
+                model_inputs['pixel_values'] = pixel_values
+                model_inputs['image_sizes'] = [(height, width) for _ in range(pixel_values.shape[0])]
             
-            # Add batch dimension to other tensors
+            # Add other inputs
             for k in ['input_ids', 'attention_mask', 'labels']:
-                if k in model_inputs and len(model_inputs[k].shape) == 1:
-                    model_inputs[k] = model_inputs[k].unsqueeze(0)
+                if k in inputs:
+                    tensor = inputs[k].to(self.device)
+                    # Add batch dimension if needed
+                    if len(tensor.shape) == 1:
+                        tensor = tensor.unsqueeze(0)
+                    model_inputs[k] = tensor
             
-            # Forward pass
-            outputs = model(**model_inputs)
-            loss = outputs.loss
+            # Debug input shapes
+            logger.info("Model inputs:")
+            for k, v in model_inputs.items():
+                if isinstance(v, torch.Tensor):
+                    logger.info(f"  {k}: shape {v.shape}, dtype {v.dtype}")
+                else:
+                    logger.info(f"  {k}: {v}")
+
+            # Forward pass with gradient checkpointing if enabled
+            with torch.amp.autocast('cuda', enabled=self.args.fp16):
+                outputs = model(**model_inputs)
+                loss = outputs.loss
+                
+            logger.info(f"Loss value: {loss.item():.4f}")
             
             if self.args.gradient_accumulation_steps > 1:
                 loss = loss / self.args.gradient_accumulation_steps
@@ -114,13 +120,10 @@ class CustomTrainer:
             
         except Exception as e:
             logger.error(f"Error in training step: {str(e)}")
-            logger.error(f"Image shape: {pixel_values.shape if 'pixel_values' in locals() else 'not available'}")
-            logger.error(f"Model inputs: {[(k, v.shape) if torch.is_tensor(v) else (k, v) for k, v in model_inputs.items()]}")
             logger.error(traceback.format_exc())
             raise
 
     def get_train_dataloader(self) -> DataLoader:
-        """Return a DataLoader for training"""
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
         
@@ -133,7 +136,6 @@ class CustomTrainer:
         )
 
     def get_eval_dataloader(self, eval_dataset=None) -> DataLoader:
-        """Return a DataLoader for evaluation"""
         dataset_to_use = eval_dataset if eval_dataset is not None else self.eval_dataset
         
         return DataLoader(
@@ -145,5 +147,18 @@ class CustomTrainer:
         )
 
     def save_model(self, output_dir):
-        """Save the model"""
-        self.model.save_pretrained(output_dir)
+        """Save the model with memory optimization"""
+        try:
+            # Clear memory before saving
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            
+            self.model.save_pretrained(
+                output_dir,
+                safe_serialization=True,
+                max_shard_size="500MB"  # Shard the model for memory efficiency
+            )
+        except Exception as e:
+            logger.error(f"Error saving model: {e}")
+            raise

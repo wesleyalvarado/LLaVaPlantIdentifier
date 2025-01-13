@@ -9,29 +9,35 @@ from typing import Optional
 class ModelConfig:
     name: str = "llava-hf/llava-v1.6-mistral-7b-hf"
     image_size: int = 224
-    dtype: str = "float32"
-    device_map: str = "auto"  # For model loading
-    trust_remote_code: bool = True  # For model loading
-    low_cpu_mem_usage: bool = True  # For model loading
+    dtype: str = "float16"
+    device_map: str = "auto"
+    trust_remote_code: bool = True
+    low_cpu_mem_usage: bool = True
 
 def get_training_args(model_dir: str) -> TrainingArguments:
     return TrainingArguments(
         output_dir=model_dir,
         per_device_train_batch_size=1,
-        gradient_accumulation_steps=8,
+        gradient_accumulation_steps=16,
         gradient_checkpointing=True,
         max_grad_norm=0.5,
         max_steps=10,
+        save_strategy="steps",
         save_steps=5,
+        evaluation_strategy="steps",  # Match save_strategy
+        eval_steps=5,  # Match save_steps
+        save_total_limit=2,  # Keep only the last 2 checkpoints
         push_to_hub=False,
         learning_rate=1e-5,
-        num_train_epochs=3,  # Changed to integer
+        num_train_epochs=3,
         warmup_ratio=0.1,
-        fp16=True,  # Enable half-precision training
-        bf16=False,
+        fp16=True,
         dataloader_num_workers=0,
         dataloader_pin_memory=False,
         optim="adamw_torch",
         torch_compile=False,
-        disable_tqdm=False  # Show progress bars
+        disable_tqdm=False,
+        load_best_model_at_end=True,
+        metric_for_best_model="loss",
+        greater_is_better=False
     )

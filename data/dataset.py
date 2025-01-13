@@ -19,7 +19,8 @@ class MemoryEfficientPlantDataset(Dataset):
         self,
         split: str = "train",
         sample_fraction: float = 1.0,
-        image_size: int = 336  # LLaVA expected size
+        image_size: int = 336,  # LLaVA expected size
+        processor = None  # Add processor parameter
     ):
         """
         Initialize the dataset.
@@ -32,11 +33,25 @@ class MemoryEfficientPlantDataset(Dataset):
         try:
             logger.info(f"Initializing {split} dataset...")
             
-            # Initialize tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+            if processor is not None:
+                self.tokenizer = processor.tokenizer
+            else:
+                self.tokenizer = AutoTokenizer.from_pretrained("llava-hf/llava-v1.6-mistral-7b-hf")
+            
+            logger.info(f"Tokenizer loaded. Pad token: {self.tokenizer.pad_token}")
+            
+            
+            # Force set the pad token and its ID
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer.padding_side = "right"  # Ensure consistent padding direction
+            
+            # Add debug logging to verify
+            logger.info(f"Pad token: {self.tokenizer.pad_token}")
+            logger.info(f"Pad eos token: {self.tokenizer.eos_token}")
             
             # Load dataset first to get class names
-            temp_dataset = load_dataset("nelorth/oxford-flowers", split=split)
+            logger.info("Loading dataset to get class names...")
+            temp_dataset = load_dataset("dpdl-benchmark/oxford_flowers102", split=split)
             self.class_names = temp_dataset.features['label'].names
             logger.info(f"Loaded {len(self.class_names)} flower categories")
             
@@ -54,6 +69,7 @@ class MemoryEfficientPlantDataset(Dataset):
             num_samples = max(1, int(len(temp_dataset) * sample_fraction))
             
             # Load subset of dataset
+            logger.info(f"Loading {num_samples} samples from dataset...")
             self.dataset = load_dataset(
                 "dpdl-benchmark/oxford_flowers102",
                 split=f"{split}[:{num_samples}]"
@@ -97,39 +113,46 @@ class MemoryEfficientPlantDataset(Dataset):
             
             # Get numerical label and class name
             numerical_label = item['label']
-            class_name = str(self.class_names[numerical_label])  # Convert to string
+            class_name = str(self.class_names[numerical_label])
             
             # Create text descriptions
             prompt = f"What type of flower is shown in this image? Please identify the flower species."
             target = f"This image shows a flower of class {class_name}."
+
+            # Ensure padding is properly set before each tokenization
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer.padding_side = "right"
             
             # Tokenize prompt
             encoded_prompt = self.tokenizer(
                 prompt,
-                padding='max_length',
+                padding=True,
                 truncation=True,
                 max_length=64,
-                return_tensors='pt'
+                return_tensors='pt',
+                pad_to_multiple_of=8
             )
             
             # Tokenize target for labels
             label_encoding = self.tokenizer(
                 target,
-                padding='max_length',
+                padding=True,
                 truncation=True,
                 max_length=64,
-                return_tensors='pt'
+                return_tensors='pt',
+                pad_to_multiple_of=8
             )
             
             return {
                 'pixel_values': image_tensor,
                 'input_ids': encoded_prompt['input_ids'].squeeze(0),
                 'attention_mask': encoded_prompt['attention_mask'].squeeze(0),
-                'labels': label_encoding['input_ids'].squeeze(0),  # This is what the trainer needs
+                'labels': label_encoding['input_ids'].squeeze(0),
                 'class_name': class_name,
+                'numerical_label': numerical_label,
                 'prompt': prompt,
                 'target': target
-            }
+            }       
             
         except Exception as e:
             logger.error(f"Error processing sample {idx}: {e}")
@@ -146,7 +169,8 @@ class MemoryEfficientPlantDataset(Dataset):
 def create_dataloaders(
     train_fraction: float = 0.8,
     batch_size: int = 1,
-    num_workers: int = 0
+    num_workers: int = 0,
+    processor = None  # Add processor parameter
 ) -> tuple[DataLoader, DataLoader]:
     """
     Create train and validation dataloaders.
@@ -163,12 +187,14 @@ def create_dataloaders(
         # Create datasets
         train_dataset = MemoryEfficientPlantDataset(
             split="train",
-            sample_fraction=train_fraction
+            sample_fraction=train_fraction,
+            processor=processor
         )
         
         val_dataset = MemoryEfficientPlantDataset(
             split="test",
-            sample_fraction=0.2  # Use 20% of test set for validation
+            sample_fraction=0.2,
+            processor=processor  
         )
         
         # Create dataloaders
@@ -194,3 +220,30 @@ def create_dataloaders(
     except Exception as e:
         logger.error(f"Failed to create dataloaders: {e}")
         raise
+
+def test_dataset(split: str = "train", sample_fraction: float = 0.01):
+    """
+    Test dataset functionality
+    """
+    try:
+        dataset = MemoryEfficientPlantDataset(
+            split=split,
+            sample_fraction=sample_fraction
+        )
+        
+        # Test first item
+        first_item = dataset[0]
+        
+        # Print available keys and shapes
+        print("\nFirst item contents:")
+        for key, value in first_item.items():
+            if isinstance(value, torch.Tensor):
+                print(f"{key}: shape {value.shape}, dtype {value.dtype}")
+            else:
+                print(f"{key}: {value}")
+                
+        return True
+        
+    except Exception as e:
+        logger.error(f"Dataset testing failed: {e}")
+        return False

@@ -3,6 +3,8 @@ import gc
 import torch
 import logging
 import traceback
+import models.trainer
+from models.trainer import CustomTrainer
 from huggingface_hub import login
 from transformers import (
     AutoProcessor,
@@ -118,6 +120,7 @@ def train_llava_model():
         
         # Start training
         logger.info("Beginning model training...")
+        logger.info(f"Available methods: {dir(trainer)}")
         trainer.train()
         
         # Save final model
@@ -132,12 +135,3 @@ def train_llava_model():
         logger.error(f"Training failed: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise
-
-# Usage in Colab:
-if __name__ == "__main__":
-    # First authenticate
-    token = "your-token-here"  # Replace with your actual token
-    setup_huggingface_auth(token)
-    
-    # Then proceed with model operations
-    load_llava_model()

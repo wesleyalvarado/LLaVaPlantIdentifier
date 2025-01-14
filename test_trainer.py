@@ -9,7 +9,8 @@ from huggingface_hub import login
 from transformers import (
     AutoProcessor, 
     LlavaNextForConditionalGeneration,
-    BitsAndBytesConfig
+    BitsAndBytesConfig,
+    ProcessorConfig
 )
 from models.trainer import CustomTrainer
 from data.dataset import MemoryEfficientPlantDataset
@@ -19,33 +20,47 @@ from config.training_config import get_training_args, ModelConfig
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def print_memory_stats():
-    """Print current memory usage statistics"""
-    logger.info("\nMemory Statistics:")
-    # CPU Memory
-    process = psutil.Process()
-    cpu_memory = process.memory_info().rss / 1024**3
-    logger.info(f"CPU Memory Usage: {cpu_memory:.2f} GB")
+def configure_processor_and_model(processor, model):
+    """Configure processor and model with required attributes."""
+    # Configure processor
+    config = ProcessorConfig(
+        patch_size=14,
+        vision_feature_select_strategy='default',
+        image_size=336
+    )
+    processor.config = config
     
-    # GPU Memory
-    if torch.cuda.is_available():
-        gpu_memory_allocated = torch.cuda.memory_allocated() / 1024**3
-        gpu_memory_cached = torch.cuda.memory_reserved() / 1024**3
-        logger.info(f"GPU Memory Allocated: {gpu_memory_allocated:.2f} GB")
-        logger.info(f"GPU Memory Cached: {gpu_memory_cached:.2f} GB")
-
-def clear_memory():
-    """Clear unused memory"""
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+    # Set patch_size directly
+    processor.patch_size = 14
+    
+    # Set vision feature strategy
+    processor.vision_feature_select_strategy = 'default'
+    
+    # Configure tokenizer padding
+    processor.tokenizer.padding_side = 'right'
+    model.padding_side = 'right'
+    
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+    
+    # Verify configuration
+    logger.info("\nProcessor configuration:")
+    logger.info(f"  patch_size: {getattr(processor, 'patch_size', None)}")
+    logger.info(f"  vision_feature_select_strategy: {getattr(processor, 'vision_feature_select_strategy', None)}")
+    logger.info(f"  config.patch_size: {getattr(processor.config, 'patch_size', None)}")
+    logger.info(f"  tokenizer padding_side: {processor.tokenizer.padding_side}")
+    logger.info(f"  model padding_side: {model.padding_side}")
+    
+    return processor, model
 
 def test_single_batch():
     """Test processing a single batch through the trainer"""
     try:
-        # Print initial memory stats
-        print_memory_stats()
+        # Clear CUDA cache and collect garbage
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+        gc.collect()
         
         # First authenticate with Hugging Face
         token = os.getenv("HUGGINGFACE_TOKEN")
@@ -54,77 +69,53 @@ def test_single_batch():
         login(token)
         
         try:
-            # Aggressive memory clearing before model loading
+            # Set memory allocation strategy
             if torch.cuda.is_available():
-                # Clear CUDA cache
-                torch.cuda.empty_cache()
-                torch.cuda.reset_peak_memory_stats()
-                # Force garbage collection
-                gc.collect()
-                
-                # Set memory allocation strategy
-                torch.cuda.set_per_process_memory_fraction(0.5)  # Use only 50% of available GPU memory
-                
-                # Check available GPU memory
-                gpu_memory = torch.cuda.get_device_properties(0).total_memory
-                logger.info(f"Total GPU memory: {gpu_memory / 1024**3:.2f} GB")
-                
-            # Set environment variables for memory management
+                torch.cuda.set_per_process_memory_fraction(0.7)
             os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:True'
             
-            logger.info("Loading processor...")
+            logger.info("Loading model and processor...")
+            model_config = ModelConfig()
+            
+            # Load processor first
             processor = AutoProcessor.from_pretrained(
-                "llava-hf/llava-v1.6-mistral-7b-hf",
+                model_config.name,
                 trust_remote_code=True
             )
             
-            logger.info("Loading model...")
-            model_config = ModelConfig()
+            # Configure processor before model loading
+            processor, _ = configure_processor_and_model(processor, None)
+            logger.info("Processor configured")
             
-            # Configure 4-bit quantization with CPU offload
+            # Configure 4-bit quantization
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.float16,
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type="nf4",
-                llm_int8_enable_fp32_cpu_offload=True,
-                llm_int8_threshold=6.0,
-                bnb_4bit_compute_type=torch.float16
+                llm_int8_enable_fp32_cpu_offload=True
             )
-
-            # Configure device map for manual layer placement
-            device_map = {
-                'transformer.word_embeddings': 'cpu',
-                'transformer.word_embeddings_layernorm': 'cpu',
-                'transformer.final_layernorm': 'cpu',
-                'transformer.prefix_encoder': 'cpu',
-                'lm_head': 'cpu'
-            }
             
-            # Load model with aggressive memory optimizations
-            logger.info("Starting model load with quantization...")
+            # Load model with memory optimizations
             model = LlavaNextForConditionalGeneration.from_pretrained(
                 model_config.name,
                 quantization_config=quantization_config,
-                device_map="auto",  # Let it automatically handle remaining layers
+                device_map="auto",
                 torch_dtype=torch.float16,
                 trust_remote_code=True,
                 offload_folder="offload",
-                offload_state_dict=True,  # Enable state dict offloading
                 low_cpu_mem_usage=True
             )
             
-            # Enable gradient checkpointing and set to eval mode initially
-            model.gradient_checkpointing_enable()
-            model.eval()  # Start in eval mode to save memory
+            # Configure model padding side
+            _, model = configure_processor_and_model(processor, model)
+            logger.info("Model configured")
             
-            # Print memory stats after model load
-            print_memory_stats()
-            
+            # Create test dataset
             logger.info("Creating test dataset...")
             test_dataset = MemoryEfficientPlantDataset(
                 split="train",
-                sample_fraction=0.01,  # Use minimal data for testing
+                sample_fraction=0.01,
                 processor=processor
             )
             
@@ -148,21 +139,11 @@ def test_single_batch():
                 train_dataset=test_dataset
             )
             
-            # Clear memory before processing batch
-            clear_memory()
-            
             # Process single batch
             logger.info("Processing batch through trainer...")
             try:
-                # Set to train mode only when needed
-                model.train()
                 loss = trainer.training_step(model, batch)
                 logger.info(f"Successfully processed batch with loss: {loss}")
-                
-                # Set back to eval mode
-                model.eval()
-                print_memory_stats()
-                
             except Exception as e:
                 logger.error(f"Failed to process batch: {e}")
                 logger.error(traceback.format_exc())

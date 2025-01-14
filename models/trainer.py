@@ -2,73 +2,14 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from typing import Dict, Union, Any, Tuple, List
+from typing import Dict, Union, Any
 import logging
 import traceback
 import gc
 
+from utils.image_utils import prepare_image_inputs, validate_image_tensors
+
 logger = logging.getLogger(__name__)
-
-def select_best_resolution(current_size: Tuple[int, int], grid_pinpoints: List[List[int]]) -> Tuple[int, int]:
-    """Select the best matching resolution from grid_pinpoints.
-    
-    Args:
-        current_size: Tuple of (height, width) for current image
-        grid_pinpoints: List of [height, width] options from model config
-        
-    Returns:
-        Tuple of (height, width) that best matches from grid_pinpoints
-    """
-    current_area = current_size[0] * current_size[1]
-    best_resolution = sorted(
-        grid_pinpoints, 
-        key=lambda x: abs(x[0]*x[1] - current_area)
-    )[0]
-    return tuple(best_resolution)
-
-def prepare_image_inputs(
-    pixel_values: torch.Tensor,
-    model: nn.Module,
-    device: torch.device
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Prepare image inputs for the LLaVA-Next model.
-    
-    Args:
-        pixel_values: Input image tensor
-        model: The LLaVA-Next model (for configuration)
-        device: Device to place tensors on
-        
-    Returns:
-        Tuple of (processed_pixel_values, image_sizes)
-    """
-    # Add batch dimension if needed
-    if len(pixel_values.shape) == 3:  # [C, H, W]
-        pixel_values = pixel_values.unsqueeze(0)  # [1, C, H, W]
-    
-    # Get dimensions
-    batch_size, channels, height, width = pixel_values.shape
-    logger.info(f"Working with image of size {height}x{width}")
-    
-    # Get the model's configuration
-    grid_pinpoints = model.config.image_grid_pinpoints
-    vision_config = model.config.vision_config
-    patch_size = vision_config.image_size
-    
-    # Find best matching resolution
-    best_resolution = select_best_resolution(
-        (height, width),
-        grid_pinpoints
-    )
-    logger.info(f"Selected resolution from grid_pinpoints: {best_resolution}")
-    
-    # Create 5D tensor with shape [batch_size, 1, channels, height, width]
-    pixel_values = pixel_values.unsqueeze(1)
-    image_sizes = torch.tensor([best_resolution], device=device)
-    
-    logger.info(f"Prepared pixel_values shape: {pixel_values.shape}")
-    logger.info(f"Prepared image_sizes: {image_sizes.tolist()}")
-    
-    return pixel_values, image_sizes
 
 class CustomTrainer:
     def __init__(self, model, args, train_dataset=None, eval_dataset=None):
@@ -149,82 +90,82 @@ class CustomTrainer:
             raise
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
-        """Perform a single training step.
-        
-        Args:
-            model: The model to train
-            inputs: Dictionary of input tensors
-            
-        Returns:
-            loss: The training loss
-        """
-        try:
-            # Clear memory before processing
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
-            
-            # Set model to training mode
-            model.train()
-            
-            # Move inputs to device and handle image processing
-            model_inputs = {}
-            
-            if 'pixel_values' in inputs:
-                pixel_values = inputs['pixel_values'].to(self.device)
-                # Original shape log
-                logger.info(f"Original pixel_values shape: {pixel_values.shape}")
+            """Perform a single training step."""
+            try:
+                # Clear memory before processing
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
                 
-                # Process image inputs
-                processed_pixels, image_sizes = prepare_image_inputs(
-                    pixel_values,
-                    model,
-                    self.device
-                )
+                # Set model to training mode
+                model.train()
                 
-                model_inputs['pixel_values'] = processed_pixels
-                model_inputs['image_sizes'] = image_sizes
-            
-            # Add other inputs (input_ids, attention_mask, labels)
-            for k in ['input_ids', 'attention_mask', 'labels']:
-                if k in inputs:
-                    tensor = inputs[k].to(self.device)
-                    if len(tensor.shape) == 1:
-                        tensor = tensor.unsqueeze(0)  # Add batch dimension if needed
-                    model_inputs[k] = tensor
-            
-            # Debug input shapes
-            logger.info("Model inputs:")
-            for k, v in model_inputs.items():
-                if isinstance(v, torch.Tensor):
-                    logger.info(f"  {k}: shape {v.shape}, dtype {v.dtype}, device {v.device}")
-                else:
-                    logger.info(f"  {k}: {v}")
+                # Move inputs to device and handle image processing
+                model_inputs = {}
+                
+                if 'pixel_values' in inputs:
+                    pixel_values = inputs['pixel_values'].to(self.device)
+                    logger.info(f"Original pixel_values shape: {pixel_values.shape}")
+                    
+                    # Process image inputs
+                    processed_pixels, image_sizes = prepare_image_inputs(
+                        pixel_values,
+                        model,
+                        self.device
+                    )
+                    
+                    # Validate tensors
+                    if not validate_image_tensors(processed_pixels, image_sizes):
+                        raise ValueError("Invalid image tensor shapes or types")
+                        
+                    model_inputs['pixel_values'] = processed_pixels
+                    model_inputs['image_sizes'] = image_sizes
+                
+                # Add other inputs (input_ids, attention_mask, labels)
+                for k in ['input_ids', 'attention_mask', 'labels']:
+                    if k in inputs:
+                        tensor = inputs[k].to(self.device)
+                        if len(tensor.shape) == 1:
+                            tensor = tensor.unsqueeze(0)  # Add batch dimension if needed
+                        model_inputs[k] = tensor
+                
+                # Debug input shapes
+                logger.info("Model inputs:")
+                for k, v in model_inputs.items():
+                    if isinstance(v, torch.Tensor):
+                        logger.info(f"  {k}: shape {v.shape}, dtype {v.dtype}, device {v.device}")
+                        if k == 'input_ids':
+                            # Log if image token is present
+                            image_token_index = model.config.image_token_index
+                            image_tokens = (v == image_token_index).sum().item()
+                            logger.info(f"  Number of image tokens found: {image_tokens}")
+                    else:
+                        logger.info(f"  {k}: {v}")
 
-            # Add vision configuration parameters
-            model_inputs.update({
-                'vision_feature_layer': -2,
-                'vision_feature_select_strategy': 'default',
-                'return_dict': True
-            })
+                # Add required configuration parameters
+                model_inputs.update({
+                    'vision_feature_layer': -2,
+                    'vision_feature_select_strategy': 'default',
+                    'return_dict': True
+                })
 
-            # Forward pass with gradient checkpointing if enabled
-            with torch.amp.autocast('cuda', enabled=self.args.fp16):
-                outputs = model(**model_inputs)
-                loss = outputs.loss
+                # Forward pass with gradient checkpointing if enabled
+                with torch.amp.autocast('cuda', enabled=self.args.fp16):
+                    outputs = model(**model_inputs)
+                    loss = outputs.loss
+                    
+                logger.info(f"Loss value: {loss.item():.4f}")
                 
-            logger.info(f"Loss value: {loss.item():.4f}")
-            
-            if self.args.gradient_accumulation_steps > 1:
-                loss = loss / self.args.gradient_accumulation_steps
-            
-            loss.backward()
-            return loss.detach()
-            
-        except Exception as e:
-            logger.error(f"Error in training step: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
+                if self.args.gradient_accumulation_steps > 1:
+                    loss = loss / self.args.gradient_accumulation_steps
+                
+                loss.backward()
+                return loss.detach()
+                
+            except Exception as e:
+                logger.error(f"Error in training step: {str(e)}")
+                logger.error(traceback.format_exc())
+                raise
 
     def get_train_dataloader(self) -> DataLoader:
         """Get the training dataloader.

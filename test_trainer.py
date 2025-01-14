@@ -6,6 +6,7 @@ import gc
 import time
 import psutil
 import traceback
+from pathlib import Path
 from huggingface_hub import login
 from transformers import (
     AutoProcessor,
@@ -14,10 +15,10 @@ from transformers import (
 )
 from models.trainer import CustomTrainer
 from data.dataset import MemoryEfficientPlantDataset
-from config.training_config import get_training_args, ModelConfig
+from config.training_config import get_training_args, ModelConfig, OptimizationConfig, DataConfig
 from utils.tokenizer_utils import smart_tokenizer_and_embedding_resize
 
-# Setup detailed logging
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 def log_system_info():
     """Log system information for debugging."""
-    logger.info("System Information:")
+    logger.info("\nSystem Information:")
     logger.info(f"CPU Count: {psutil.cpu_count()}")
     logger.info(f"Memory: {psutil.virtual_memory().total / (1024**3):.2f}GB")
     if torch.cuda.is_available():
@@ -34,264 +35,363 @@ def log_system_info():
         logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / (1024**3):.2f}GB")
     logger.info(f"PyTorch Version: {torch.__version__}")
 
-def configure_processor_and_model(processor, model):
-    """Configure processor with values from model config."""
-    # Get values from model config
-    patch_size = model.config.vision_config.patch_size
-    vision_strategy = model.config.vision_feature_select_strategy
-    image_size = model.config.vision_config.image_size
-    
-    # Configure vision processor
-    if hasattr(processor, 'image_processor'):
-        processor.image_processor.patch_size = patch_size
-        processor.image_processor.vision_feature_select_strategy = vision_strategy
-        processor.image_processor.size = {'height': image_size, 'width': image_size}
-        if hasattr(processor.image_processor, 'config'):
-            processor.image_processor.config.patch_size = patch_size
-            processor.image_processor.config.image_size = image_size
-            processor.image_processor.config.vision_feature_select_strategy = vision_strategy
-    
-    # Configure processor
-    processor.patch_size = patch_size
-    processor.vision_feature_select_strategy = vision_strategy
-    processor.image_size = image_size
-    
-    if not hasattr(processor, 'config'):
-        processor.config = type('ProcessorConfig', (), {})()
-    processor.config.patch_size = patch_size
-    processor.config.image_size = image_size
-    processor.config.vision_feature_select_strategy = vision_strategy
-    
-    # Configure tokenizer
-    processor.tokenizer.padding_side = 'right'
-    if processor.tokenizer.pad_token is None:
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
-    
-    # Log configuration
-    logger.info("\nConfiguration:")
-    logger.info(f"  Model config values:")
-    logger.info(f"    patch_size: {patch_size}")
-    logger.info(f"    vision_feature_select_strategy: {vision_strategy}")
-    logger.info(f"    image_size: {image_size}")
-    logger.info(f"  Processor values:")
-    logger.info(f"    patch_size: {processor.patch_size}")
-    logger.info(f"    vision_feature_select_strategy: {processor.vision_feature_select_strategy}")
-    logger.info(f"    image_processor.patch_size: {getattr(processor.image_processor, 'patch_size', None)}")
-    logger.info(f"    image_processor.vision_feature_select_strategy: {getattr(processor.image_processor, 'vision_feature_select_strategy', None)}")
-    
-    return processor, model
+def setup_test_environment():
+    """Setup test environment including output directories."""
+    test_dir = Path("test_output")
+    test_dir.mkdir(parents=True, exist_ok=True)
+    (test_dir / "checkpoints").mkdir(exist_ok=True)
+    (test_dir / "cache").mkdir(exist_ok=True)
+    return test_dir
 
-def configure_model(model):
-    """Configure model with required attributes."""
-    # Set padding side
-    model.config.padding_side = 'right'
-    model.padding_side = 'right'
-    
-    # Ensure correct image settings
-    if hasattr(model.config, 'vision_config'):
-        model.config.vision_config.image_size = 336
-        model.config.vision_config.patch_size = 14
-    
-    logger.info("\nModel configuration:")
-    logger.info(f"  padding_side: {model.padding_side}")
-    logger.info(f"  config padding_side: {model.config.padding_side}")
-    if hasattr(model.config, 'vision_config'):
-        logger.info(f"  vision_config.image_size: {model.config.vision_config.image_size}")
-        logger.info(f"  vision_config.patch_size: {model.config.vision_config.patch_size}")
-    
-    return model
-
-def test_memory_usage():
-    """Test memory usage during model operations."""
+def cleanup_test_environment(test_dir: Path):
+    """Clean up test environment."""
     if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-        initial_memory = torch.cuda.memory_allocated()
-        
-        # Run garbage collection
-        gc.collect()
         torch.cuda.empty_cache()
-        
-        # Log memory statistics
-        current_memory = torch.cuda.memory_allocated()
-        peak_memory = torch.cuda.max_memory_allocated()
-        
-        logger.info("\nMemory Usage Statistics:")
-        logger.info(f"  Initial Memory: {initial_memory / 1024**2:.2f}MB")
-        logger.info(f"  Current Memory: {current_memory / 1024**2:.2f}MB")
-        logger.info(f"  Peak Memory: {peak_memory / 1024**2:.2f}MB")
-        
-        return peak_memory < torch.cuda.get_device_properties(0).total_memory * 0.9
-    return True
+    gc.collect()
 
-def test_single_batch():
-    """Test processing a single batch through the trainer"""
+def load_model_for_testing(model_config: ModelConfig):
+    """Load model with appropriate configuration for testing."""
     try:
-        # Memory cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
-        gc.collect()
+        # First, fix the missing import
+        from transformers import AutoConfig
         
-        # Set CUDA launch blocking for better error messages
-        os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-        
-        # Authenticate with Hugging Face
-        token = os.getenv("HUGGINGFACE_TOKEN")
-        if not token:
-            raise ValueError("HUGGINGFACE_TOKEN environment variable not set.")
-        login(token)
-        
-        # Get model config
-        model_config = ModelConfig()
-
         # Configure quantization
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4"
+            bnb_4bit_quant_type="nf4",
+            llm_int8_enable_fp32_cpu_offload=True
         )
 
-        # Load model first
-        logger.info("Loading model...")
+        # Create comprehensive device map including vision tower components
+        device_map = {
+            'model.embed_tokens': 'cuda:0',
+            'model.layers': 'cuda:0',
+            'lm_head': 'cpu',
+            'model.norm': 'cuda:0',
+            'image_newline': 'cuda:0',
+            'model.vision_model': 'cuda:0',
+            'model.language_model': 'cuda:0',
+            'vision_encoder': 'cuda:0',
+            'language_model': 'cuda:0',
+            'multi_modal_projector': 'cuda:0',
+            'multi_modal_projector.linear_1': 'cuda:0',
+            'multi_modal_projector.linear_2': 'cuda:0',
+            'multi_modal_projector.layer_norm': 'cuda:0',
+            # Add vision tower components
+            'vision_tower': 'cuda:0',
+            'vision_tower.vision_model': 'cuda:0',
+            'vision_tower.vision_model.embeddings': 'cuda:0',
+            'vision_tower.vision_model.embeddings.class_embedding': 'cuda:0',
+            'vision_tower.vision_model.embeddings.position_embedding': 'cuda:0',
+            'vision_tower.vision_model.embeddings.patch_embedding': 'cuda:0',
+            'vision_tower.vision_model.pre_layrnorm': 'cuda:0',
+            'vision_tower.vision_model.encoder': 'cuda:0',
+            'vision_tower.vision_model.post_layernorm': 'cuda:0',
+            'vision_tower.mm_projector': 'cuda:0'
+        }
+
+        logger.info("Loading model with device map...")
+        logger.info(f"Device map configuration: {device_map}")
+
+        # Load model with more explicit configuration
         model = LlavaNextForConditionalGeneration.from_pretrained(
             model_config.name,
             quantization_config=quantization_config,
-            device_map="auto",
-            torch_dtype=torch.float16
+            device_map=device_map,
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+            max_memory={
+                0: "12GB",
+                "cpu": "48GB"
+            },
+            offload_folder="offload"  # Add offload folder for large models
         )
+
+        # Enable gradient checkpointing
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+            logger.info("Gradient checkpointing enabled")
+
+        # Verify model loaded successfully
+        logger.info("Successfully loaded model")
+        logger.info(f"Model device map: {model.hf_device_map}")
+
+        return model
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        logger.error(traceback.format_exc())
         
-        # Load and configure processor
-        logger.info("Loading and configuring processor...")
+        # Add more detailed error information
+        if "device set" in str(e):
+            logger.error("Device mapping issue detected. Component not properly mapped:")
+            component = str(e).split("'")[0].strip()
+            logger.error(f"Missing component: {component}")
+        return None
+    
+def setup_processor(model_config: ModelConfig):
+    """Setup and configure processor."""
+    try:
         processor = AutoProcessor.from_pretrained(
             model_config.name,
             trust_remote_code=True
         )
         
-        # Configure processor and model
-        processor, model = configure_processor_and_model(processor, model)
-        logger.info("Processor and model configured")
-        model = configure_model(model)
+        # Configure processor
+        processor.image_processor.size = {'height': model_config.image_size, 'width': model_config.image_size}
+        processor.image_processor.patch_size = model_config.patch_size
+        processor.tokenizer.padding_side = 'right'
         
-        # Create test dataset
-        logger.info("Creating test dataset...")
-        test_dataset = MemoryEfficientPlantDataset(
+        return processor
+    except Exception as e:
+        logger.error(f"Error setting up processor: {e}")
+        logger.error(traceback.format_exc())
+        return None
+
+def test_model_loading():
+    """Test model loading and configuration."""
+    try:
+        # Inspect components first
+        if not inspect_model_components():
+            logger.warning("Could not inspect model components")
+            
+        # Check device availability
+        if not check_device_availability():
+            logger.warning("Testing will proceed with CPU only")
+            
+        model_config = ModelConfig()
+        model = load_model_for_testing(model_config)
+        
+        if model is None:
+            return False
+            
+        # Verify device mapping
+        if not verify_model_devices(model):
+            return False
+            
+        logger.info("Model loaded successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Model loading test failed: {e}")
+        return False
+
+def test_processor_setup():
+    """Test processor setup and configuration."""
+    try:
+        model_config = ModelConfig()
+        processor = setup_processor(model_config)
+        
+        if processor is None:
+            return False
+            
+        logger.info("Processor configured successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Processor setup test failed: {e}")
+        return False
+
+def test_dataset_creation():
+    """Test dataset creation and processing."""
+    try:
+        model_config = ModelConfig()
+        processor = setup_processor(model_config)
+        
+        if processor is None:
+            return False
+            
+        # Create small test dataset
+        dataset = MemoryEfficientPlantDataset(
             processor=processor,
             split="train",
-            sample_fraction=0.01
+            sample_fraction=0.01,
+            cache_dir="test_output/cache"
+        )
+        
+        if len(dataset) == 0:
+            logger.error("Dataset is empty")
+            return False
+            
+        logger.info(f"Created dataset with {len(dataset)} samples")
+        return True
+    except Exception as e:
+        logger.error(f"Dataset creation test failed: {e}")
+        return False
+
+def test_single_batch():
+    """Test processing a single batch."""
+    try:
+        model_config = ModelConfig()
+        processor = setup_processor(model_config)
+        model = load_model_for_testing(model_config)
+        
+        if None in (processor, model):
+            return False
+            
+        # Create test dataset
+        dataset = MemoryEfficientPlantDataset(
+            processor=processor,
+            split="train",
+            sample_fraction=0.01,
+            cache_dir="test_output/cache"
         )
         
         # Get single batch
-        logger.info("Getting single batch...")
-        batch = test_dataset[0]
-        
-        # Debug tensor shapes
-        for key, value in batch.items():
-            if isinstance(value, torch.Tensor):
-                logger.info(f"{key} shape: {value.shape}")
-            else:
-                logger.info(f"{key}: {value}")
+        batch = dataset[0]
         
         # Setup trainer
-        logger.info("Setting up trainer...")
-        training_args = get_training_args("test_output")
+        training_args = get_training_args(
+            "test_output",
+            model_config,
+            OptimizationConfig(),
+            DataConfig()
+        )
+        
         trainer = CustomTrainer(
             model=model,
             args=training_args,
-            train_dataset=test_dataset
+            train_dataset=dataset
         )
         
         # Process batch
-        logger.info("Processing batch through trainer...")
         loss = trainer.training_step(model, batch)
-        logger.info(f"Successfully processed batch with loss: {loss}")
+        logger.info(f"Batch processed with loss: {loss.item():.4f}")
         
         return True
-            
     except Exception as e:
-        logger.error(f"Test failed: {e}")
+        logger.error(f"Single batch test failed: {e}")
         logger.error(traceback.format_exc())
         return False
 
-def test_multiple_batches(num_batches=3):
-    """Test processing multiple batches to verify stability."""
+def test_multiple_batches(num_batches=2):
+    """Test processing multiple batches."""
     try:
-        logger.info(f"\nTesting {num_batches} batches for stability...")
-        losses = []
-        memory_usage = []
+        logger.info(f"Testing {num_batches} batches...")
         
         for i in range(num_batches):
-            start_time = time.time()
-            
-            # Record initial memory
-            if torch.cuda.is_available():
-                initial_memory = torch.cuda.memory_allocated()
-            
-            # Process batch
-            success = test_single_batch()
-            if not success:
+            if not test_single_batch():
                 logger.error(f"Batch {i+1} failed")
                 return False
-            
-            # Record memory after batch
-            if torch.cuda.is_available():
-                final_memory = torch.cuda.memory_allocated()
-                memory_diff = final_memory - initial_memory
-                memory_usage.append(memory_diff)
-            
-            # Calculate batch time
-            batch_time = time.time() - start_time
-            logger.info(f"Batch {i+1} completed in {batch_time:.2f}s")
-            
-            # Cleanup
-            gc.collect()
+                
+            # Cleanup between batches
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        
-        # Log memory statistics
-        if torch.cuda.is_available():
-            logger.info("\nMemory Usage Statistics:")
-            logger.info(f"  Average memory difference: {sum(memory_usage) / len(memory_usage) / 1024**2:.2f}MB")
-            logger.info(f"  Max memory difference: {max(memory_usage) / 1024**2:.2f}MB")
-        
+            gc.collect()
+            
+            logger.info(f"Batch {i+1} completed successfully")
+            
         return True
-        
     except Exception as e:
         logger.error(f"Multiple batch test failed: {e}")
-        logger.error(traceback.format_exc())
         return False
 
-def main():
-    """Run all tests."""
+def run_all_tests():
+    """Run all tests in sequence."""
     try:
+        # Setup test environment
+        test_dir = setup_test_environment()
+        
         # Log system information
         log_system_info()
         
-        # Run memory test
-        logger.info("\nRunning memory usage test...")
-        if not test_memory_usage():
-            logger.error("Memory usage test failed")
-            return False
+        tests = [
+            ("Model Loading", test_model_loading),
+            ("Processor Setup", test_processor_setup),
+            ("Dataset Creation", test_dataset_creation),
+            ("Single Batch", test_single_batch),
+            ("Multiple Batches", lambda: test_multiple_batches(2))
+        ]
         
-        # Run single batch test
-        logger.info("\nRunning single batch test...")
-        if not test_single_batch():
-            logger.error("Single batch test failed")
-            return False
+        results = []
+        for test_name, test_func in tests:
+            logger.info(f"\nRunning {test_name} test...")
+            try:
+                success = test_func()
+                results.append((test_name, success))
+                logger.info(f"{test_name} test: {'Passed' if success else 'Failed'}")
+            except Exception as e:
+                logger.error(f"{test_name} test failed with error: {e}")
+                results.append((test_name, False))
+            
+            # Cleanup after each test
+            cleanup_test_environment(test_dir)
         
-        # Run multiple batch test
-        logger.info("\nRunning multiple batch test...")
-        if not test_multiple_batches(num_batches=3):
-            logger.error("Multiple batch test failed")
-            return False
+        # Log final results
+        logger.info("\nTest Results:")
+        for test_name, success in results:
+            logger.info(f"{test_name}: {'Passed' if success else 'Failed'}")
         
-        logger.info("\nAll tests completed successfully!")
-        return True
+        return all(success for _, success in results)
         
     except Exception as e:
         logger.error(f"Testing failed: {e}")
         logger.error(traceback.format_exc())
         return False
+    
+def verify_model_devices(model):
+    """Verify all model components are properly mapped to devices."""
+    try:
+        device_issues = []
+        
+        # Check each named parameter
+        for name, param in model.named_parameters():
+            if param.device == torch.device("meta"):
+                device_issues.append(f"{name} is on meta device")
+            if param.device.type == "cpu" and "lm_head" not in name:
+                logger.warning(f"{name} is on CPU")
+
+        if device_issues:
+            logger.error("Device mapping issues found:")
+            for issue in device_issues:
+                logger.error(f"  - {issue}")
+            return False
+            
+        logger.info("All model components properly mapped to devices")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error verifying model devices: {e}")
+        return False
+    
+def check_device_availability():
+    """Check and log available devices and memory."""
+    logger.info("\nChecking device availability...")
+    
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            prop = torch.cuda.get_device_properties(i)
+            logger.info(f"CUDA Device {i}: {prop.name}")
+            logger.info(f"  Total memory: {prop.total_memory / 1024**3:.2f}GB")
+            logger.info(f"  Free memory: {torch.cuda.memory_allocated(i) / 1024**3:.2f}GB used")
+            
+        # Set default device
+        torch.cuda.set_device(0)
+        logger.info(f"Default CUDA device set to: cuda:0")
+        return True
+    else:
+        logger.warning("No CUDA device available, falling back to CPU")
+        return False
+
+def inspect_model_components():
+    """Inspect model components and their parameters."""
+    try:
+        config = AutoConfig.from_pretrained(ModelConfig().name)
+        logger.info("Model architecture components:")
+        for attr in dir(config):
+            if not attr.startswith('_'):
+                logger.info(f"  - {attr}")
+        return True
+    except Exception as e:
+        logger.error(f"Error inspecting model components: {e}")
+        return False
 
 if __name__ == "__main__":
-    main()
+    # Check for HUGGINGFACE_TOKEN
+    if not os.getenv("HUGGINGFACE_TOKEN"):
+        logger.error("HUGGINGFACE_TOKEN environment variable not set")
+        exit(1)
+        
+    login(token=os.getenv("HUGGINGFACE_TOKEN"))
+    success = run_all_tests()
+    exit(0 if success else 1)

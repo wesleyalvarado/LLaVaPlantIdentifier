@@ -7,14 +7,17 @@ from typing import Optional
 
 @dataclass
 class ModelConfig:
+    """Model configuration with correct image size for LLaVA."""
     name: str = "llava-hf/llava-v1.6-mistral-7b-hf"
-    image_size: int = 224
+    image_size: int = 336  # Match CLIP's expected size
+    patch_size: int = 14   # CLIP patch size
     dtype: str = "float16"
     device_map: str = "auto"
     trust_remote_code: bool = True
     low_cpu_mem_usage: bool = True
 
 def get_training_args(model_dir: str) -> TrainingArguments:
+    """Get training arguments with memory-efficient settings."""
     return TrainingArguments(
         output_dir=model_dir,
         per_device_train_batch_size=1,
@@ -24,9 +27,9 @@ def get_training_args(model_dir: str) -> TrainingArguments:
         max_steps=10,
         save_strategy="steps",
         save_steps=5,
-        evaluation_strategy="steps",  # Match save_strategy
-        eval_steps=5,  # Match save_steps
-        save_total_limit=2,  # Keep only the last 2 checkpoints
+        evaluation_strategy="steps",
+        eval_steps=5,
+        save_total_limit=2,
         push_to_hub=False,
         learning_rate=1e-5,
         num_train_epochs=3,

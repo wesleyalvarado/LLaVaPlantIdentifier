@@ -3,6 +3,8 @@ import os
 import torch
 import logging
 import gc
+import time
+import psutil
 import traceback
 from huggingface_hub import login
 from transformers import (
@@ -16,8 +18,21 @@ from config.training_config import get_training_args, ModelConfig
 from utils.tokenizer_utils import smart_tokenizer_and_embedding_resize
 
 # Setup detailed logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+def log_system_info():
+    """Log system information for debugging."""
+    logger.info("System Information:")
+    logger.info(f"CPU Count: {psutil.cpu_count()}")
+    logger.info(f"Memory: {psutil.virtual_memory().total / (1024**3):.2f}GB")
+    if torch.cuda.is_available():
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / (1024**3):.2f}GB")
+    logger.info(f"PyTorch Version: {torch.__version__}")
 
 def configure_processor_and_model(processor, model):
     """Configure processor with values from model config."""
@@ -52,10 +67,7 @@ def configure_processor_and_model(processor, model):
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
     
-    # Configure model padding
-    model.config.padding_side = 'right'
-    model.padding_side = 'right'
-    
+    # Log configuration
     logger.info("\nConfiguration:")
     logger.info(f"  Model config values:")
     logger.info(f"    patch_size: {patch_size}")
@@ -88,6 +100,28 @@ def configure_model(model):
         logger.info(f"  vision_config.patch_size: {model.config.vision_config.patch_size}")
     
     return model
+
+def test_memory_usage():
+    """Test memory usage during model operations."""
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        initial_memory = torch.cuda.memory_allocated()
+        
+        # Run garbage collection
+        gc.collect()
+        torch.cuda.empty_cache()
+        
+        # Log memory statistics
+        current_memory = torch.cuda.memory_allocated()
+        peak_memory = torch.cuda.max_memory_allocated()
+        
+        logger.info("\nMemory Usage Statistics:")
+        logger.info(f"  Initial Memory: {initial_memory / 1024**2:.2f}MB")
+        logger.info(f"  Current Memory: {current_memory / 1024**2:.2f}MB")
+        logger.info(f"  Peak Memory: {peak_memory / 1024**2:.2f}MB")
+        
+        return peak_memory < torch.cuda.get_device_properties(0).total_memory * 0.9
+    return True
 
 def test_single_batch():
     """Test processing a single batch through the trainer"""
@@ -127,20 +161,17 @@ def test_single_batch():
             torch_dtype=torch.float16
         )
         
-        # Load and configure processor with model's values
+        # Load and configure processor
         logger.info("Loading and configuring processor...")
         processor = AutoProcessor.from_pretrained(
             model_config.name,
             trust_remote_code=True
         )
         
-        # Configure processor using model's values
+        # Configure processor and model
         processor, model = configure_processor_and_model(processor, model)
         logger.info("Processor and model configured")
-        
-        # Configure model
         model = configure_model(model)
-        logger.info("Model configured")
         
         # Create test dataset
         logger.info("Creating test dataset...")
@@ -174,11 +205,93 @@ def test_single_batch():
         logger.info("Processing batch through trainer...")
         loss = trainer.training_step(model, batch)
         logger.info(f"Successfully processed batch with loss: {loss}")
+        
+        return True
             
     except Exception as e:
         logger.error(f"Test failed: {e}")
         logger.error(traceback.format_exc())
-        raise
+        return False
+
+def test_multiple_batches(num_batches=3):
+    """Test processing multiple batches to verify stability."""
+    try:
+        logger.info(f"\nTesting {num_batches} batches for stability...")
+        losses = []
+        memory_usage = []
+        
+        for i in range(num_batches):
+            start_time = time.time()
+            
+            # Record initial memory
+            if torch.cuda.is_available():
+                initial_memory = torch.cuda.memory_allocated()
+            
+            # Process batch
+            success = test_single_batch()
+            if not success:
+                logger.error(f"Batch {i+1} failed")
+                return False
+            
+            # Record memory after batch
+            if torch.cuda.is_available():
+                final_memory = torch.cuda.memory_allocated()
+                memory_diff = final_memory - initial_memory
+                memory_usage.append(memory_diff)
+            
+            # Calculate batch time
+            batch_time = time.time() - start_time
+            logger.info(f"Batch {i+1} completed in {batch_time:.2f}s")
+            
+            # Cleanup
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        # Log memory statistics
+        if torch.cuda.is_available():
+            logger.info("\nMemory Usage Statistics:")
+            logger.info(f"  Average memory difference: {sum(memory_usage) / len(memory_usage) / 1024**2:.2f}MB")
+            logger.info(f"  Max memory difference: {max(memory_usage) / 1024**2:.2f}MB")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Multiple batch test failed: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
+def main():
+    """Run all tests."""
+    try:
+        # Log system information
+        log_system_info()
+        
+        # Run memory test
+        logger.info("\nRunning memory usage test...")
+        if not test_memory_usage():
+            logger.error("Memory usage test failed")
+            return False
+        
+        # Run single batch test
+        logger.info("\nRunning single batch test...")
+        if not test_single_batch():
+            logger.error("Single batch test failed")
+            return False
+        
+        # Run multiple batch test
+        logger.info("\nRunning multiple batch test...")
+        if not test_multiple_batches(num_batches=3):
+            logger.error("Multiple batch test failed")
+            return False
+        
+        logger.info("\nAll tests completed successfully!")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Testing failed: {e}")
+        logger.error(traceback.format_exc())
+        return False
 
 if __name__ == "__main__":
-    test_single_batch()
+    main()

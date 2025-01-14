@@ -27,7 +27,7 @@ def get_training_args(model_dir: str) -> TrainingArguments:
         max_steps=10,
         save_strategy="steps",
         save_steps=5,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=5,
         save_total_limit=2,
         push_to_hub=False,

@@ -36,9 +36,9 @@ llava_plants/
 ## Prerequisites
 
 ### Hardware Requirements
-- Minimum 16GB RAM
-- GPU with at least 8GB VRAM (recommended)
-- Storage: 20GB free space
+- Minimum 50GB RAM
+- GPU with at least 16GB VRAM (required)
+- Storage: 50GB free space
 
 ### Software Requirements
 - Python 3.10+
@@ -171,6 +171,3 @@ Verify the following in the output:
    - Run test_trainer.py before commits
    - Validate memory usage
    - Check tensor shapes
-
-## License
-[Your License Here]

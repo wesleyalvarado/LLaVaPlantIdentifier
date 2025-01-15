@@ -229,18 +229,18 @@ class MemoryEfficientPlantDataset(Dataset):
         return self.processed_data[idx]
 
     def get_class_weights(self) -> torch.Tensor:
-        """Calculate class weights for imbalanced dataset handling.
-        
-        Returns:
-            Tensor of class weights
-        """
+        """Calculate class weights for imbalanced dataset handling."""
         labels = [sample['numerical_label'] for sample in self.processed_data]
         class_counts = np.bincount(labels)
         total_samples = len(labels)
         
-        # Calculate inverse weights
-        weights = total_samples / (len(self.class_names) * class_counts)
+        # Add small epsilon to avoid division by zero
+        eps = 1e-8
+        weights = total_samples / (len(self.class_names) * (class_counts + eps))
         weights = torch.tensor(weights, dtype=torch.float32)
+        
+        # Clip weights to avoid extreme values
+        weights = torch.clamp(weights, min=0.1, max=10.0)
         
         return weights.to(self.device)
 

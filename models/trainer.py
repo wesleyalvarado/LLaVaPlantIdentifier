@@ -117,64 +117,63 @@ class CustomTrainer:
                 logger.info(f"  image_token_index: {self.model.config.image_token_index}")
 
     def compute_loss(self, model_outputs: Any, labels: torch.Tensor) -> torch.Tensor:
-        """Compute loss with optional class weighting."""
+        """Compute loss with proper padding and scaling."""
         try:
-            # Get logits and convert to float32 immediately
-            logits = model_outputs.logits.float()  # Convert to float32 at the start
-            
-            # Convert labels to long type
+            # Get logits and convert to float32
+            logits = model_outputs.logits.float()
             labels = labels.to(logits.device).long()
 
-            logger.debug(f"Original shapes:")
-            logger.debug(f"  Logits: {logits.shape}")
-            logger.debug(f"  Labels: {labels.shape}")
+            # Get shapes
+            batch_size, seq_length, vocab_size = logits.shape
+            label_length = labels.size(1)
 
-            # Pad labels if needed
-            if logits.size(1) > labels.size(1):
-                pad_length = logits.size(1) - labels.size(1)
+            # Pad or truncate labels to match logits sequence length
+            if seq_length > label_length:
+                # Pad labels with -100
                 labels = torch.nn.functional.pad(
                     labels, 
-                    (0, pad_length), 
+                    (0, seq_length - label_length),
                     value=-100
                 )
-            
-            # Reshape tensors
-            batch_size = logits.size(0)
-            seq_length = logits.size(1)
-            num_classes = logits.size(2)
-            
-            logits = logits.reshape(-1, num_classes)
+            else:
+                # Truncate labels
+                labels = labels[:, :seq_length]
+
+            # Reshape for loss calculation
+            logits = logits.reshape(-1, vocab_size)
             labels = labels.reshape(-1)
 
-            # Create loss function with float32 weights if needed
+            # Create loss function with scaled weights
             if self.class_weights is not None:
                 class_weights = self.class_weights.to(logits.device).float()
+                # Scale down weights to prevent NaN
+                class_weights = class_weights / class_weights.max()
                 loss_fct = nn.CrossEntropyLoss(
                     weight=class_weights,
                     ignore_index=-100,
-                    reduction='mean'
+                    reduction='mean',
+                    label_smoothing=0.1  # Add label smoothing
                 )
             else:
                 loss_fct = nn.CrossEntropyLoss(
                     ignore_index=-100,
-                    reduction='mean'
+                    reduction='mean',
+                    label_smoothing=0.1
                 )
 
-            logger.debug(f"Reshaped dimensions:")
-            logger.debug(f"  Logits: {logits.shape}")
-            logger.debug(f"  Labels: {labels.shape}")
-            logger.debug(f"  Logits dtype: {logits.dtype}")
-            logger.debug(f"  Labels dtype: {labels.dtype}")
-
-            # Compute loss with float32 tensors
+            # Compute loss
             loss = loss_fct(logits, labels)
             
+            # Check for NaN loss
+            if torch.isnan(loss):
+                logger.error(f"NaN loss detected!")
+                logger.error(f"Logits stats: min={logits.min()}, max={logits.max()}, mean={logits.mean()}")
+                return torch.tensor(0.0, device=self.device)
+                
             return loss
 
         except Exception as e:
             logger.error(f"Error computing loss: {e}")
-            logger.error(f"Logits shape: {logits.shape if 'logits' in locals() else 'N/A'}")
-            logger.error(f"Labels shape: {labels.shape if 'labels' in locals() else 'N/A'}")
             logger.error(traceback.format_exc())
             raise
 

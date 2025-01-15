@@ -80,77 +80,60 @@ def setup_model_and_processor(model_config: ModelConfig, args):
             trust_remote_code=True
         )
         
-        # Configure processor with required attributes
-        processor.patch_size = model_config.patch_size
-        processor.vision_feature_select_strategy = 'default'
+        # Configure processor explicitly
+        processor.image_processor.patch_size = model_config.patch_size
+        processor.image_processor.vision_feature_select_strategy = 'default'
+        processor.image_processor.size = {
+            'height': model_config.image_size,
+            'width': model_config.image_size
+        }
         
-        # Set the attributes on the image processor as well
-        if hasattr(processor, 'image_processor'):
-            processor.image_processor.patch_size = model_config.patch_size
-            processor.image_processor.vision_feature_select_strategy = 'default'
-            processor.image_processor.size = {
-                'height': model_config.image_size,
-                'width': model_config.image_size
-            }
+        # Set padding side consistently for training
+        processor.tokenizer.padding_side = 'right'
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
         
-        # Set attributes in the config
+        # Update processor config
         if not hasattr(processor, 'config'):
             processor.config = type('ProcessorConfig', (), {})()
         processor.config.patch_size = model_config.patch_size
         processor.config.vision_feature_select_strategy = 'default'
         processor.config.image_size = model_config.image_size
         
-        # Configure tokenizer
-        processor.tokenizer.padding_side = 'right'  # For training
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        
-        # Log processor configuration
-        logger.info("Processor configuration:")
-        logger.info(f"  patch_size: {getattr(processor, 'patch_size', None)}")
-        logger.info(f"  vision_feature_select_strategy: {getattr(processor, 'vision_feature_select_strategy', None)}")
-        logger.info(f"  image_processor.patch_size: {getattr(processor.image_processor, 'patch_size', None)}")
-        logger.info(f"  config.patch_size: {getattr(processor.config, 'patch_size', None)}")
-        
-        # Configure quantization
+        # Configure quantization - modified part
+        compute_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=compute_dtype,
             bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4"
+            bnb_4bit_quant_type="nf4",
+            llm_int8_enable_fp32_cpu_offload=True
         )
 
-        # Load and configure model
+        # Load model with modified config
         logger.info("Loading model...")
         model = LlavaNextForConditionalGeneration.from_pretrained(
             model_config.name,
             quantization_config=quantization_config,
-            torch_dtype=torch.float16,
+            torch_dtype=compute_dtype,
             device_map="auto",
             trust_remote_code=True,
             low_cpu_mem_usage=True
         )
         
-        # Configure model for training
-        model.config.use_cache = False  # Required for gradient checkpointing
-        model.config.padding_side = 'right'  # For training
+        # Configure model
+        model.config.use_cache = False
+        model.config.padding_side = 'right'
         model.padding_side = 'right'
-        
-        if hasattr(model, "gradient_checkpointing_enable"):
-            model.gradient_checkpointing_enable()
-            logger.info("Gradient checkpointing enabled")
-        
-        # Ensure model knows about processor configuration
         model.config.vision_config.patch_size = model_config.patch_size
         model.config.vision_config.image_size = model_config.image_size
         model.config.vision_feature_select_strategy = 'default'
         
-        # Log model configuration
-        logger.info("Model configuration:")
-        logger.info(f"  padding_side: {model.padding_side}")
-        logger.info(f"  use_cache: {model.config.use_cache}")
-        logger.info(f"  patch_size: {model.config.vision_config.patch_size}")
-        logger.info(f"  image_size: {model.config.vision_config.image_size}")
+        # Enable gradient checkpointing
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+            logger.info("Gradient checkpointing enabled")
         
+        logger.info(f"Model loaded with compute dtype: {compute_dtype}")
         return model, processor
         
     except Exception as e:

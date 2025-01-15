@@ -49,9 +49,6 @@ class CustomTrainer:
         self.optimizer = self._create_optimizer()
         self.scheduler = self._create_scheduler()
         
-        # Initialize gradient scaler for mixed precision
-        self.scaler = torch.amp.GradScaler('cuda')
-        
         # Training state
         self.global_step = 0
         self.best_eval_loss = float('inf')
@@ -117,7 +114,7 @@ class CustomTrainer:
                 logger.info(f"  image_token_index: {self.model.config.image_token_index}")
 
     def compute_loss(self, model_outputs: Any, labels: torch.Tensor) -> torch.Tensor:
-        """Compute loss with proper padding and scaling."""
+        """Compute loss for LLaVA text generation."""
         try:
             # Get logits and convert to float32
             logits = model_outputs.logits.float()
@@ -129,47 +126,44 @@ class CustomTrainer:
 
             # Pad or truncate labels to match logits sequence length
             if seq_length > label_length:
-                # Pad labels with -100
                 labels = torch.nn.functional.pad(
                     labels, 
                     (0, seq_length - label_length),
-                    value=-100
+                    value=-100  # Padding token
                 )
             else:
-                # Truncate labels
                 labels = labels[:, :seq_length]
 
             # Reshape for loss calculation
             logits = logits.reshape(-1, vocab_size)
             labels = labels.reshape(-1)
 
-            # Create loss function with scaled weights
-            if self.class_weights is not None:
-                class_weights = self.class_weights.to(logits.device).float()
-                # Scale down weights to prevent NaN
-                class_weights = class_weights / class_weights.max()
-                loss_fct = nn.CrossEntropyLoss(
-                    weight=class_weights,
-                    ignore_index=-100,
-                    reduction='mean',
-                    label_smoothing=0.1  # Add label smoothing
-                )
-            else:
-                loss_fct = nn.CrossEntropyLoss(
-                    ignore_index=-100,
-                    reduction='mean',
-                    label_smoothing=0.1
-                )
+            # Simple CrossEntropyLoss for text generation
+            loss_fct = nn.CrossEntropyLoss(
+                ignore_index=-100,
+                reduction='mean',
+                label_smoothing=0.1
+            )
 
             # Compute loss
             loss = loss_fct(logits, labels)
-            
-            # Check for NaN loss
-            if torch.isnan(loss):
-                logger.error(f"NaN loss detected!")
-                logger.error(f"Logits stats: min={logits.min()}, max={logits.max()}, mean={logits.mean()}")
-                return torch.tensor(0.0, device=self.device)
-                
+
+            # Log detailed stats for debugging
+            if loss is not None:
+                with torch.no_grad():
+                    logger.debug(f"Loss computation stats:")
+                    logger.debug(f"  Loss value: {loss.item():.4f}")
+                    logger.debug(f"  Logits shape: {logits.shape}")
+                    logger.debug(f"  Labels shape: {labels.shape}")
+                    logger.debug(f"  Logits min/max: {logits.min().item():.4f}/{logits.max().item():.4f}")
+                    probs = torch.softmax(logits, dim=-1)
+                    logger.debug(f"  Probability min/max: {probs.min().item():.4f}/{probs.max().item():.4f}")
+
+            # Validate loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.error(f"Invalid loss detected!")
+                return None
+
             return loss
 
         except Exception as e:
@@ -208,8 +202,8 @@ class CustomTrainer:
             "loss": loss.item()
         }
 
-    def training_step(self, model: nn.Module, inputs: Dict[str, Any]) -> torch.Tensor:
-        """Perform a training step with proper gradient scaling and shape handling."""
+    def training_step(self, model: nn.Module, inputs: Dict[str, Any]) -> Optional[torch.Tensor]:
+        """Perform a training step with comprehensive error handling and stability checks."""
         try:
             # Memory cleanup
             if torch.cuda.is_available():
@@ -220,7 +214,7 @@ class CustomTrainer:
             model.train()
             
             # Process pixel values
-            pixel_values = inputs['pixel_values'].to(self.device).to(torch.float32)  # Changed from float16
+            pixel_values = inputs['pixel_values'].to(self.device)
             logger.debug(f"Initial pixel_values shape: {pixel_values.shape}")
             
             # Convert to required shape [B, num_patches, C, H, W]
@@ -240,66 +234,90 @@ class CustomTrainer:
                 pixel_values = pixel_values.unsqueeze(1).expand(-1, num_patches, -1, -1, -1)
                 logger.debug(f"Reshaped pixel_values: {pixel_values.shape}")
 
-            # Ensure input_ids has a valid shape
-            if 'input_ids' in inputs:
-                input_ids = inputs['input_ids'].clone().detach().to(self.device)
-                if len(input_ids.shape) == 1:  # Add batch dimension if it's missing
-                    input_ids = input_ids.unsqueeze(0)
-            else:
-                raise ValueError("Missing 'input_ids' in inputs.")
-            
-            if 'attention_mask' in inputs:
-                attention_mask = inputs['attention_mask'] = ensure_2d(inputs['attention_mask']).to(self.device)
-            
-            if 'labels' in inputs:
-                labels = inputs['labels'] = ensure_2d(inputs['labels']).to(self.device)
+            # Get other inputs
+            input_ids = inputs['input_ids'].to(self.device)
+            attention_mask = inputs['attention_mask'].to(self.device)
+            labels = inputs['labels'].to(self.device).long()  # Ensure long dtype for labels
+
+            # Validate inputs
+            if torch.isnan(pixel_values).any():
+                logger.error("NaN detected in pixel_values")
+                return None
+                
+            if torch.isinf(pixel_values).any():
+                logger.error("Inf detected in pixel_values")
+                return None
 
             # Create model inputs
             model_inputs = {
                 'pixel_values': pixel_values,
                 'input_ids': input_ids,
                 'attention_mask': attention_mask,
-                'labels': labels.to(torch.long),
+                'labels': labels,
                 'image_sizes': torch.tensor([[336, 336]], device=self.device, dtype=torch.long),
                 'vision_feature_layer': -2,
-                'vision_feature_select_strategy': 'default'
+                'vision_feature_select_strategy': 'default',
+                'return_dict': True
             }
 
-            # Filter valid model inputs
-            valid_model_inputs = {
-                key: value for key, value in model_inputs.items() 
-                if key in [
-                    'input_ids', 'attention_mask', 'pixel_values', 'image_sizes', 
-                    'labels', 'position_ids', 'past_key_values', 'inputs_embeds',
-                    'vision_feature_layer', 'vision_feature_select_strategy', 
-                    'use_cache', 'output_attentions', 'output_hidden_states', 
-                    'return_dict', 'cache_position', 'num_logits_to_keep'
-                ]
-            }
-            
-            # Forward pass with mixed precision
-            with torch.cuda.amp.autocast():
-                outputs = model(**valid_model_inputs)
-                loss = self.compute_loss(outputs, model_inputs['labels'])
-                    
-                # Handle None loss
-                if loss is None:
-                    logger.error("Loss computation returned None")
-                    return torch.tensor(0.0, device=self.device)
-            
-            # Scale loss for gradient accumulation
-            if self.args.gradient_accumulation_steps > 1:
-                loss = loss / self.args.gradient_accumulation_steps
-            
-            # Backward pass with gradient scaling
-            self.scaler.scale(loss).backward()
-            
-            return loss.detach()
+            # Forward pass
+            with torch.amp.autocast(device_type='cuda', dtype=torch.float32, enabled=True):
+                outputs = model(**model_inputs)
                 
+                # Get loss from model outputs or compute it
+                if hasattr(outputs, 'loss'):
+                    loss = outputs.loss
+                else:
+                    loss = self.compute_loss(outputs, model_inputs['labels'])
+                
+                # Validate loss before proceeding
+                if loss is None or torch.isnan(loss) or torch.isinf(loss):
+                    logger.error(f"Invalid loss detected: {loss}")
+                    return None
+                
+                logger.debug(f"Loss value: {loss.item()}")
+                
+                # Scale loss for gradient accumulation
+                if self.args.gradient_accumulation_steps > 1:
+                    loss = loss / self.args.gradient_accumulation_steps
+
+            # Backward pass
+            loss.backward()
+
+            # Validate gradients
+            valid_gradients = True
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any():
+                        logger.error(f"NaN gradient detected in {name}")
+                        valid_gradients = False
+                        break
+                    if torch.isinf(param.grad).any():
+                        logger.error(f"Infinite gradient detected in {name}")
+                        valid_gradients = False
+                        break
+
+            if not valid_gradients:
+                return None
+
+            # Apply gradient clipping
+            if self.args.max_grad_norm > 0:
+                try:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        self.args.max_grad_norm,
+                        error_if_nonfinite=True
+                    )
+                except RuntimeError as e:
+                    logger.error(f"Gradient clipping failed: {e}")
+                    return None
+
+            return loss.detach()
+
         except Exception as e:
             logger.error(f"Error in training step: {e}")
             logger.error(traceback.format_exc())
-            raise
+            return None
 
     def _save_checkpoint(self, epoch: int, step: int, save_dir: str):
         """Save training checkpoint."""
@@ -385,62 +403,66 @@ class CustomTrainer:
         
         return metrics
 
-
     def train(self, resume_from_checkpoint: Optional[str] = None):
-        """Main training loop.
-        
-        Args:
-            resume_from_checkpoint: Optional checkpoint to resume from
-        """
+        """Main training loop with comprehensive error handling and stability monitoring."""
         try:
             # Load checkpoint if specified
             if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
                 self._load_checkpoint(resume_from_checkpoint)
-                    
+                        
             train_dataloader = self.get_train_dataloader()
-            self.model.zero_grad()
-                
+            self.model.zero_grad(set_to_none=True)
+                    
             num_epochs = int(self.args.num_train_epochs)
-                
+            nan_count = 0  # Track consecutive NaN/error occurrences
+            best_loss = float('inf')
+            patience_counter = 0
+            max_patience = 3  # Number of evaluations without improvement before stopping
+            
             for epoch in range(num_epochs):
                 logger.info(f"Starting epoch {epoch}/{num_epochs}")
                 progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch}")
-                    
+                epoch_loss = 0.0
+                valid_steps = 0
+                        
                 for step, inputs in enumerate(progress_bar):
                     # Clear memory before each step
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     gc.collect()
-                        
+                            
                     # Perform training step
                     loss = self.training_step(self.model, inputs)
+                    
+                    # Handle invalid loss
+                    if loss is None or torch.isnan(loss) or torch.isinf(loss):
+                        nan_count += 1
+                        logger.warning(f"Invalid loss detected (count: {nan_count})")
                         
+                        if nan_count >= 3:  # Three strikes rule
+                            logger.error("Too many invalid losses detected. Stopping training.")
+                            return
+                        continue
+                    
+                    # Valid loss obtained
+                    nan_count = 0  # Reset counter
+                    epoch_loss += loss.item()
+                    valid_steps += 1
+                    
                     # Update progress bar
-                    progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
-                        
+                    progress_bar.set_postfix({
+                        "loss": f"{loss.item():.4f}",
+                        "avg_loss": f"{(epoch_loss/valid_steps):.4f}"
+                    })
+                            
                     # Gradient accumulation and optimization
                     if (step + 1) % self.args.gradient_accumulation_steps == 0:
-                        # Clip gradients
-                        self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), 
-                            self.args.max_grad_norm
-                        )
-                        
-                        # Optimizer step with gradient scaling
-                        scale_before = self.scaler.get_scale()
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        scale_after = self.scaler.get_scale()
-                        optimizer_stepped = scale_before <= scale_after
-                        
-                        # Only step scheduler if optimizer stepped
-                        if optimizer_stepped:
-                            self.scheduler.step()
-                            
-                        self.model.zero_grad()
+                        # Optimizer step
+                        self.optimizer.step()
+                        self.scheduler.step()
+                        self.model.zero_grad(set_to_none=True)
                         self.global_step += 1
-                        
+                            
                         # Save checkpoint
                         if self.global_step % self.args.save_steps == 0:
                             self._save_checkpoint(
@@ -448,26 +470,48 @@ class CustomTrainer:
                                 self.global_step,
                                 self.args.output_dir
                             )
-                        
+                            
                         # Evaluation
                         if self.global_step % self.args.eval_steps == 0:
                             metrics = self.evaluate()
                             logger.info(f"Evaluation metrics: {metrics}")
-                            
-                            # Call evaluation callbacks
                             self.on_evaluate(metrics)
-                        
-                    # Check max steps
-                    if self.args.max_steps > 0 and self.global_step >= self.args.max_steps:
-                        progress_bar.close()
-                        logger.info("Reached maximum steps, stopping training")
-                        return
-                    
+                            
+                            # Early stopping check
+                            current_loss = metrics.get('eval_loss', float('inf'))
+                            if current_loss < best_loss:
+                                best_loss = current_loss
+                                patience_counter = 0
+                            else:
+                                patience_counter += 1
+                                if patience_counter >= max_patience:
+                                    logger.info("Early stopping triggered - no improvement in evaluation loss")
+                                    return
+                            
+                        # Check max steps
+                        if self.args.max_steps > 0 and self.global_step >= self.args.max_steps:
+                            progress_bar.close()
+                            logger.info("Reached maximum steps, stopping training")
+                            return
+                
+                # End of epoch logging
+                if valid_steps > 0:
+                    avg_epoch_loss = epoch_loss / valid_steps
+                    logger.info(f"Epoch {epoch} completed with average loss: {avg_epoch_loss:.4f}")
+                
                 # End of epoch cleanup
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 gc.collect()
-                
+                    
+            # Final cleanup and model saving
+            self._save_checkpoint(
+                num_epochs - 1,
+                self.global_step,
+                self.args.output_dir
+            )
+            logger.info("Training completed successfully")
+                    
         except Exception as e:
             logger.error(f"Training failed: {str(e)}")
             logger.error(traceback.format_exc())

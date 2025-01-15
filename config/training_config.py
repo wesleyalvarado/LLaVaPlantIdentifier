@@ -32,10 +32,10 @@ class OptimizationConfig:
     learning_rate: float = 1e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
-    max_grad_norm: float = 0.5
-    gradient_accumulation_steps: int = 16
+    max_grad_norm: float = 1.0
+    gradient_accumulation_steps: int = 8
     num_train_epochs: int = 3
-    max_steps: int = 10000
+    max_steps: int = 1000
     early_stopping_patience: int = 3
     early_stopping_threshold: float = 0.01
     use_8bit_quantization: bool = False
@@ -60,7 +60,7 @@ def get_training_args(
     optim_config: OptimizationConfig,
     data_config: DataConfig
 ) -> TrainingArguments:
-    """Get training arguments with proper precision settings."""
+    """Get training arguments with corrected precision settings."""
     
     os.makedirs(model_dir, exist_ok=True)
     if model_config.checkpoint_dir:
@@ -85,10 +85,9 @@ def get_training_args(
         save_strategy="steps",
         save_total_limit=model_config.save_total_limit,
         
-        # Precision settings
-        fp16=True,  # Enable mixed precision training
-        fp16_opt_level="O1",  # Conservative mixed precision
-        fp16_backend="auto",
+        # Updated precision settings
+        bf16=True,  # Use bfloat16 instead of fp16
+        fp16=False,  # Disable fp16
         
         # Memory optimization
         gradient_checkpointing=model_config.gradient_checkpointing,

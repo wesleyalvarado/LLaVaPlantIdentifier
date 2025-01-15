@@ -145,6 +145,18 @@ def prepare_datasets(processor, data_config: DataConfig, image_size: int, args):
         # Calculate class weights
         class_weights = train_dataset.get_class_weights()
         
+        # Adjust class_weights to match total number of classes
+        total_classes = 32064
+        if class_weights.shape[0] != total_classes:
+            logger.warning(
+                f"Adjusting class_weights from shape {class_weights.shape} to match {total_classes} classes"
+            )
+            class_weights = torch.nn.functional.pad(
+                class_weights, (0, total_classes - class_weights.shape[0]), value=1.0
+            )
+        
+        logger.info(f"Final class weights shape: {class_weights.shape}")
+        
         return train_dataset, eval_dataset, class_weights
         
     except Exception as e:

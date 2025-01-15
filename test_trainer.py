@@ -11,7 +11,8 @@ from huggingface_hub import login
 from transformers import (
     AutoProcessor,
     LlavaNextForConditionalGeneration,
-    BitsAndBytesConfig
+    BitsAndBytesConfig,
+    AutoConfig
 )
 from models.trainer import CustomTrainer
 from data.dataset import MemoryEfficientPlantDataset

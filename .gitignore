@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.log
+*.tmp.driveupload
 .env
 venv/
 conda_env/.DS_Store

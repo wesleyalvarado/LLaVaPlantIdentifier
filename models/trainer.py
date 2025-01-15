@@ -276,8 +276,9 @@ class CustomTrainer:
             
             # Forward pass with mixed precision
             with torch.amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
-                outputs = model(**model_inputs)
+                valid_model_inputs = {key: value for key, value in model_inputs.items() if key in ['input_ids', 'attention_mask', 'pixel_values', 'image_sizes', 'labels', 'position_ids', 'past_key_values', 'inputs_embeds', 'vision_feature_layer', 'vision_feature_select_strategy', 'use_cache', 'output_attentions', 'output_hidden_states', 'return_dict', 'cache_position', 'num_logits_to_keep']}
                 
+                outputs = model(**valid_model_inputs)
                 # Log shapes before loss computation
                 logger.debug(f"Model output logits shape: {outputs.logits.shape}")
                 logger.debug(f"Labels shape: {model_inputs['labels'].shape}")
@@ -349,7 +350,8 @@ class CustomTrainer:
                          for k, v in inputs.items()}
                 
                 # Forward pass
-                outputs = self.model(**inputs)
+                valid_inputs = {key: value for key, value in inputs.items() if key in ['input_ids', 'attention_mask', 'pixel_values', 'image_sizes', 'labels', 'position_ids', 'past_key_values', 'inputs_embeds', 'vision_feature_layer', 'vision_feature_select_strategy', 'use_cache', 'output_attentions', 'output_hidden_states', 'return_dict', 'cache_position', 'num_logits_to_keep']}
+                outputs = self.model(**valid_inputs)
                 loss = self.compute_loss(outputs, inputs['labels'])
                 
                 total_eval_loss += loss.item()

@@ -80,7 +80,7 @@ def get_training_args(
         
         # Evaluation
         eval_steps=model_config.eval_steps,
-        eval_strategy="steps",
+        eval_strategy="steps",  # Changed from eval_strategy
         save_steps=model_config.save_steps,
         save_strategy="steps",
         save_total_limit=model_config.save_total_limit,

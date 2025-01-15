@@ -24,7 +24,8 @@ class CustomTrainer:
         args: Any,
         train_dataset=None,
         eval_dataset=None,
-        class_weights: Optional[torch.Tensor] = None
+        class_weights: Optional[torch.Tensor] = None,
+        callbacks: Optional[List] = None
     ):
         """Initialize trainer.
         
@@ -34,6 +35,7 @@ class CustomTrainer:
             train_dataset: Training dataset
             eval_dataset: Evaluation dataset
             class_weights: Optional tensor of class weights for loss calculation
+            callbacks: Optional list of training callbacks
         """
         self.model = model
         self.args = args
@@ -41,18 +43,18 @@ class CustomTrainer:
         self.eval_dataset = eval_dataset
         self.device = next(model.parameters()).device
         self.class_weights = class_weights.to(self.device) if class_weights is not None else None
+        self.callbacks = callbacks or []
         
         # Initialize optimizer and scheduler
         self.optimizer = self._create_optimizer()
         self.scheduler = self._create_scheduler()
         
         # Initialize gradient scaler for mixed precision
-        self.scaler = torch.amp.GradScaler('cuda')
+        self.scaler = torch.cuda.amp.GradScaler()
         
         # Training state
         self.global_step = 0
         self.best_eval_loss = float('inf')
-        self.early_stopping_count = 0
         
         # Enable memory optimizations
         if hasattr(model, "gradient_checkpointing_enable"):
@@ -60,6 +62,12 @@ class CustomTrainer:
             
         # Log initial configuration
         self._log_model_config()
+    
+    def on_evaluate(self, metrics: Dict[str, float]):
+        """Handle evaluation callbacks."""
+        for callback in self.callbacks:
+            if hasattr(callback, 'on_evaluate'):
+                callback.on_evaluate(self.args, self.global_step, metrics)
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create optimizer."""
@@ -111,37 +119,38 @@ class CustomTrainer:
     def compute_loss(self, model_outputs: Any, labels: torch.Tensor) -> torch.Tensor:
         """Compute loss with optional class weighting."""
         try:
-            # Get logits
-            logits = model_outputs.logits  # [batch_size, sequence_length, vocab_size]
-            labels = labels.to(logits.device)
+            # Get logits and convert to float32 immediately
+            logits = model_outputs.logits.float()  # Convert to float32 at the start
+            
+            # Convert labels to long type
+            labels = labels.to(logits.device).long()
 
-            # Log original shapes
             logger.debug(f"Original shapes:")
             logger.debug(f"  Logits: {logits.shape}")
             logger.debug(f"  Labels: {labels.shape}")
 
-            # Pad labels to match logits sequence length
+            # Pad labels if needed
             if logits.size(1) > labels.size(1):
                 pad_length = logits.size(1) - labels.size(1)
-                # Pad with -100 to ignore these positions in loss calculation
                 labels = torch.nn.functional.pad(
                     labels, 
                     (0, pad_length), 
                     value=-100
                 )
             
-            # Reshape both tensors
+            # Reshape tensors
             batch_size = logits.size(0)
             seq_length = logits.size(1)
             num_classes = logits.size(2)
             
-            logits = logits.reshape(-1, num_classes)  # [batch_size * seq_length, vocab_size]
-            labels = labels.reshape(-1)  # [batch_size * seq_length]
+            logits = logits.reshape(-1, num_classes)
+            labels = labels.reshape(-1)
 
-            # Create loss function
+            # Create loss function with float32 weights if needed
             if self.class_weights is not None:
+                class_weights = self.class_weights.to(logits.device).float()
                 loss_fct = nn.CrossEntropyLoss(
-                    weight=self.class_weights,
+                    weight=class_weights,
                     ignore_index=-100,
                     reduction='mean'
                 )
@@ -151,12 +160,13 @@ class CustomTrainer:
                     reduction='mean'
                 )
 
-            # Log reshaped dimensions
             logger.debug(f"Reshaped dimensions:")
             logger.debug(f"  Logits: {logits.shape}")
             logger.debug(f"  Labels: {labels.shape}")
+            logger.debug(f"  Logits dtype: {logits.dtype}")
+            logger.debug(f"  Labels dtype: {labels.dtype}")
 
-            # Compute loss
+            # Compute loss with float32 tensors
             loss = loss_fct(logits, labels)
             
             return loss
@@ -200,15 +210,6 @@ class CustomTrainer:
         }
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Any]) -> torch.Tensor:
-        """Perform a single training step.
-        
-        Args:
-            model: The model to train
-            inputs: Input dictionary containing tensors
-                
-        Returns:
-            Loss tensor
-        """
         try:
             # Memory cleanup
             if torch.cuda.is_available():
@@ -218,14 +219,8 @@ class CustomTrainer:
             # Set model to training mode
             model.train()
             
-            # Log input shapes
-            logger.debug("Original input shapes:")
-            for key, value in inputs.items():
-                if isinstance(value, torch.Tensor):
-                    logger.debug(f"  {key}: shape {value.shape}")
-            
             # Process pixel values
-            pixel_values = inputs['pixel_values'].to(self.device)
+            pixel_values = inputs['pixel_values'].to(self.device).to(torch.float16)
             logger.debug(f"Initial pixel_values shape: {pixel_values.shape}")
             
             # Convert to required shape [B, num_patches, C, H, W]
@@ -245,54 +240,34 @@ class CustomTrainer:
                 pixel_values = pixel_values.unsqueeze(1).expand(-1, num_patches, -1, -1, -1)
                 logger.debug(f"Reshaped pixel_values: {pixel_values.shape}")
             
-            # Process model inputs
-            model_inputs = {}
-            for k in ['input_ids', 'attention_mask', 'labels']:
-                if k in inputs:
-                    tensor = inputs[k].clone().detach().to(self.device)
-                    if len(tensor.shape) == 1:
-                        tensor = tensor.unsqueeze(0)
-                    model_inputs[k] = tensor
-            
-            # Add processed image inputs
-            model_inputs.update({
+            # Create model inputs
+            model_inputs = {
                 'pixel_values': pixel_values,
-                'image_sizes': torch.tensor([[336, 336]], device=self.device),
+                'input_ids': inputs['input_ids'].to(self.device),
+                'attention_mask': inputs['attention_mask'].to(self.device),
+                'labels': inputs['labels'].to(self.device).to(torch.long),
+                'image_sizes': torch.tensor([[336, 336]], device=self.device, dtype=torch.long),
                 'vision_feature_layer': -2,
                 'vision_feature_select_strategy': 'default'
-            })
-            
-            # Log final inputs
-            logger.debug("Final model inputs:")
-            for key, value in model_inputs.items():
-                if isinstance(value, torch.Tensor):
-                    logger.debug(f"  {key}: shape={value.shape}, dtype={value.dtype}")
-                else:
-                    logger.debug(f"  {key}: {value}")
-                    
-                if key == 'input_ids':
-                    num_tokens = (value == model.config.image_token_index).sum().item()
-                    logger.debug(f"  Number of image tokens: {num_tokens}")
+            }
             
             # Forward pass with mixed precision
             with torch.amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
-                valid_model_inputs = {key: value for key, value in model_inputs.items() if key in ['input_ids', 'attention_mask', 'pixel_values', 'image_sizes', 'labels', 'position_ids', 'past_key_values', 'inputs_embeds', 'vision_feature_layer', 'vision_feature_select_strategy', 'use_cache', 'output_attentions', 'output_hidden_states', 'return_dict', 'cache_position', 'num_logits_to_keep']}
-                
-                outputs = model(**valid_model_inputs)
-                # Log shapes before loss computation
-                logger.debug(f"Model output logits shape: {outputs.logits.shape}")
-                logger.debug(f"Labels shape: {model_inputs['labels'].shape}")
-                
+                outputs = model(**model_inputs)
                 loss = self.compute_loss(outputs, model_inputs['labels'])
+                
+                # Handle None loss
+                if loss is None:
+                    logger.error("Loss computation returned None")
+                    return torch.tensor(0.0, device=self.device)
             
-            # Scale loss and backward
+            # Scale loss for gradient accumulation
             if self.args.gradient_accumulation_steps > 1:
                 loss = loss / self.args.gradient_accumulation_steps
             
             self.scaler.scale(loss).backward()
             
             return loss.detach()
-        
                 
         except Exception as e:
             logger.error(f"Error in training step: {e}")
@@ -308,8 +283,7 @@ class CustomTrainer:
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'scaler_state_dict': self.scaler.state_dict(),
-            'best_eval_loss': self.best_eval_loss,
-            'early_stopping_count': self.early_stopping_count
+            'best_eval_loss': self.best_eval_loss
         }
         
         checkpoint_path = Path(save_dir) / f'checkpoint-{step}'
@@ -330,8 +304,6 @@ class CustomTrainer:
         
         self.global_step = checkpoint['step']
         self.best_eval_loss = checkpoint['best_eval_loss']
-        self.early_stopping_count = checkpoint['early_stopping_count']
-        
         logger.info(f"Loaded checkpoint from {checkpoint_path}")
 
     def evaluate(self) -> Dict[str, float]:
@@ -345,26 +317,47 @@ class CustomTrainer:
         
         with torch.no_grad():
             for inputs in eval_dataloader:
-                # Process inputs
-                inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
-                         for k, v in inputs.items()}
+                # Process pixel values with same reshaping as training
+                pixel_values = inputs['pixel_values'].to(self.device)
+                if len(pixel_values.shape) == 3:
+                    pixel_values = pixel_values.unsqueeze(0)
+                
+                # Apply patch reshaping
+                if len(pixel_values.shape) == 4:
+                    patch_size = self.model.config.vision_config.patch_size
+                    H, W = pixel_values.shape[2:]
+                    h_patches = H // patch_size
+                    w_patches = W // patch_size
+                    num_patches = (h_patches * w_patches) + 1
+                    B, C = pixel_values.shape[:2]
+                    pixel_values = pixel_values.unsqueeze(1).expand(-1, num_patches, -1, -1, -1)
+                
+                # Create model inputs
+                model_inputs = {
+                    'pixel_values': pixel_values,
+                    'input_ids': inputs['input_ids'].to(self.device),
+                    'attention_mask': inputs['attention_mask'].to(self.device),
+                    'labels': inputs['labels'].to(self.device),
+                    'image_sizes': torch.tensor([[336, 336]], device=self.device),
+                    'vision_feature_layer': -2,
+                    'vision_feature_select_strategy': 'default'
+                }
                 
                 # Forward pass
-                valid_inputs = {key: value for key, value in inputs.items() if key in ['input_ids', 'attention_mask', 'pixel_values', 'image_sizes', 'labels', 'position_ids', 'past_key_values', 'inputs_embeds', 'vision_feature_layer', 'vision_feature_select_strategy', 'use_cache', 'output_attentions', 'output_hidden_states', 'return_dict', 'cache_position', 'num_logits_to_keep']}
-                outputs = self.model(**valid_inputs)
-                loss = self.compute_loss(outputs, inputs['labels'])
+                outputs = self.model(**model_inputs)
+                loss = self.compute_loss(outputs, model_inputs['labels'])
                 
                 total_eval_loss += loss.item()
                 all_predictions.append(outputs.logits.detach().cpu())
                 all_labels.append(inputs['labels'].cpu())
         
         # Compute metrics
-        all_predictions = torch.cat(all_predictions)
-        all_labels = torch.cat(all_labels)
-        metrics = self.compute_metrics((all_predictions, all_labels))
-        metrics['eval_loss'] = total_eval_loss / len(eval_dataloader)
+        metrics = {
+            'eval_loss': total_eval_loss / len(eval_dataloader)
+        }
         
         return metrics
+
 
     def train(self, resume_from_checkpoint: Optional[str] = None):
         """Main training loop.
@@ -429,24 +422,6 @@ class CustomTrainer:
                     if self.global_step % self.args.eval_steps == 0:
                         metrics = self.evaluate()
                         logger.info(f"Evaluation metrics: {metrics}")
-                        
-                        # Early stopping check
-                        eval_loss = metrics['eval_loss']
-                        if eval_loss < self.best_eval_loss:
-                            self.best_eval_loss = eval_loss
-                            self.early_stopping_count = 0
-                            # Save best model
-                            self._save_checkpoint(
-                                epoch,
-                                self.global_step,
-                                os.path.join(self.args.output_dir, "best_model")
-                            )
-                        else:
-                            self.early_stopping_count += 1
-                            if (self.early_stopping_count >= 
-                                self.args.early_stopping_patience):
-                                logger.info("Early stopping triggered")
-                                return
                     
                     # Check max steps
                     if self.args.max_steps > 0 and self.global_step >= self.args.max_steps:

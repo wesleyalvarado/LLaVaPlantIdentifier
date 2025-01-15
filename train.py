@@ -14,6 +14,8 @@ from transformers import (
 )
 import logging
 from torch.utils.data import DataLoader
+from transformers import EarlyStoppingCallback
+
 
 # Set environment variables
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
@@ -222,7 +224,8 @@ def train_llava_model(args):
             args=training_args,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            class_weights=class_weights
+            class_weights=class_weights,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
         )
         
         # Start training

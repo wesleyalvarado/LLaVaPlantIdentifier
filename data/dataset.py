@@ -164,17 +164,17 @@ class MemoryEfficientPlantDataset(Dataset):
             
             # Create input dictionary
             inputs = {
-                'pixel_values': pixel_values.to(self.device),
+                'pixel_values': pixel_values.to(self.device).to(torch.float16),
                 'input_ids': torch.tensor(text_inputs['input_ids'], dtype=torch.long).to(self.device),
                 'attention_mask': torch.tensor(text_inputs['attention_mask'], dtype=torch.long).to(self.device),
-                'image_sizes': torch.tensor([self.image_size, self.image_size], dtype=torch.long).to(self.device),
                 'labels': torch.tensor(label_inputs['input_ids'], dtype=torch.long).to(self.device),
+                'image_sizes': torch.tensor([self.image_size, self.image_size], dtype=torch.long).to(self.device),
                 'class_name': self.class_names[item['label']],
                 'numerical_label': item['label'],
                 'prompt': prompt,
                 'target': target
             }
-            
+                        
             # Debug first sample
             if idx == 0:
                 logger.info("First sample shape information:")

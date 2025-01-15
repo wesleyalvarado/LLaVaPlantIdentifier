@@ -209,6 +209,7 @@ class CustomTrainer:
         }
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Any]) -> torch.Tensor:
+        """Perform a training step with proper gradient scaling and shape handling."""
         try:
             # Memory cleanup
             if torch.cuda.is_available():
@@ -219,7 +220,7 @@ class CustomTrainer:
             model.train()
             
             # Process pixel values
-            pixel_values = inputs['pixel_values'].to(self.device).to(torch.float16)
+            pixel_values = inputs['pixel_values'].to(self.device).to(torch.float32)  # Changed from float16
             logger.debug(f"Initial pixel_values shape: {pixel_values.shape}")
             
             # Convert to required shape [B, num_patches, C, H, W]
@@ -264,13 +265,23 @@ class CustomTrainer:
                 'vision_feature_select_strategy': 'default'
             }
 
-            valid_model_inputs = {key: value for key, value in model_inputs.items() if key in ['input_ids', 'attention_mask', 'pixel_values', 'image_sizes', 'labels', 'position_ids', 'past_key_values', 'inputs_embeds', 'vision_feature_layer', 'vision_feature_select_strategy', 'use_cache', 'output_attentions', 'output_hidden_states', 'return_dict', 'cache_position', 'num_logits_to_keep']}
+            # Filter valid model inputs
+            valid_model_inputs = {
+                key: value for key, value in model_inputs.items() 
+                if key in [
+                    'input_ids', 'attention_mask', 'pixel_values', 'image_sizes', 
+                    'labels', 'position_ids', 'past_key_values', 'inputs_embeds',
+                    'vision_feature_layer', 'vision_feature_select_strategy', 
+                    'use_cache', 'output_attentions', 'output_hidden_states', 
+                    'return_dict', 'cache_position', 'num_logits_to_keep'
+                ]
+            }
             
             # Forward pass with mixed precision
-            with torch.amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+            with torch.cuda.amp.autocast():
                 outputs = model(**valid_model_inputs)
                 loss = self.compute_loss(outputs, model_inputs['labels'])
-                
+                    
                 # Handle None loss
                 if loss is None:
                     logger.error("Loss computation returned None")
@@ -280,6 +291,7 @@ class CustomTrainer:
             if self.args.gradient_accumulation_steps > 1:
                 loss = loss / self.args.gradient_accumulation_steps
             
+            # Backward pass with gradient scaling
             self.scaler.scale(loss).backward()
             
             return loss.detach()
@@ -384,66 +396,73 @@ class CustomTrainer:
             # Load checkpoint if specified
             if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
                 self._load_checkpoint(resume_from_checkpoint)
-                
+                    
             train_dataloader = self.get_train_dataloader()
             self.model.zero_grad()
-            
+                
             num_epochs = int(self.args.num_train_epochs)
-            
+                
             for epoch in range(num_epochs):
                 logger.info(f"Starting epoch {epoch}/{num_epochs}")
                 progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch}")
-                
+                    
                 for step, inputs in enumerate(progress_bar):
                     # Clear memory before each step
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     gc.collect()
-                    
+                        
                     # Perform training step
                     loss = self.training_step(self.model, inputs)
-                    
+                        
                     # Update progress bar
                     progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
-                    
+                        
                     # Gradient accumulation and optimization
                     if (step + 1) % self.args.gradient_accumulation_steps == 0:
-                        # Unscale gradients
-                        self.scaler.unscale_(self.optimizer)
-                        
                         # Clip gradients
+                        self.scaler.unscale_(self.optimizer)
                         torch.nn.utils.clip_grad_norm_(
                             self.model.parameters(), 
                             self.args.max_grad_norm
                         )
                         
                         # Optimizer step with gradient scaling
+                        scale_before = self.scaler.get_scale()
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
-                        self.scheduler.step()
-                        self.model.zero_grad()
+                        scale_after = self.scaler.get_scale()
+                        optimizer_stepped = scale_before <= scale_after
                         
+                        # Only step scheduler if optimizer stepped
+                        if optimizer_stepped:
+                            self.scheduler.step()
+                            
+                        self.model.zero_grad()
                         self.global_step += 1
-                    
-                    # Save checkpoint
-                    if self.global_step % self.args.save_steps == 0:
-                        self._save_checkpoint(
-                            epoch,
-                            self.global_step,
-                            self.args.output_dir
-                        )
-                    
-                    # Evaluation
-                    if self.global_step % self.args.eval_steps == 0:
-                        metrics = self.evaluate()
-                        logger.info(f"Evaluation metrics: {metrics}")
-                    
+                        
+                        # Save checkpoint
+                        if self.global_step % self.args.save_steps == 0:
+                            self._save_checkpoint(
+                                epoch,
+                                self.global_step,
+                                self.args.output_dir
+                            )
+                        
+                        # Evaluation
+                        if self.global_step % self.args.eval_steps == 0:
+                            metrics = self.evaluate()
+                            logger.info(f"Evaluation metrics: {metrics}")
+                            
+                            # Call evaluation callbacks
+                            self.on_evaluate(metrics)
+                        
                     # Check max steps
                     if self.args.max_steps > 0 and self.global_step >= self.args.max_steps:
                         progress_bar.close()
                         logger.info("Reached maximum steps, stopping training")
                         return
-                
+                    
                 # End of epoch cleanup
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()

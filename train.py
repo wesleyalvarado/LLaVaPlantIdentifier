@@ -73,6 +73,44 @@ def setup_model_and_processor(model_config: ModelConfig, args):
     try:
         logger = logging.getLogger(__name__)
         
+        # Load processor first
+        logger.info("Loading processor...")
+        processor = AutoProcessor.from_pretrained(
+            model_config.name,
+            trust_remote_code=True
+        )
+        
+        # Configure processor with required attributes
+        processor.patch_size = model_config.patch_size
+        processor.vision_feature_select_strategy = 'default'
+        
+        # Set the attributes on the image processor as well
+        if hasattr(processor, 'image_processor'):
+            processor.image_processor.patch_size = model_config.patch_size
+            processor.image_processor.vision_feature_select_strategy = 'default'
+            processor.image_processor.size = {
+                'height': model_config.image_size,
+                'width': model_config.image_size
+            }
+        
+        # Set attributes in the config
+        if not hasattr(processor, 'config'):
+            processor.config = type('ProcessorConfig', (), {})()
+        processor.config.patch_size = model_config.patch_size
+        processor.config.vision_feature_select_strategy = 'default'
+        processor.config.image_size = model_config.image_size
+        
+        # Configure tokenizer
+        processor.tokenizer.padding_side = 'right'  # For training
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+        
+        # Log processor configuration
+        logger.info("Processor configuration:")
+        logger.info(f"  patch_size: {getattr(processor, 'patch_size', None)}")
+        logger.info(f"  vision_feature_select_strategy: {getattr(processor, 'vision_feature_select_strategy', None)}")
+        logger.info(f"  image_processor.patch_size: {getattr(processor.image_processor, 'patch_size', None)}")
+        logger.info(f"  config.patch_size: {getattr(processor.config, 'patch_size', None)}")
+        
         # Configure quantization
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -81,38 +119,37 @@ def setup_model_and_processor(model_config: ModelConfig, args):
             bnb_4bit_quant_type="nf4"
         )
 
-        # Load processor first
-        logger.info("Loading processor...")
-        processor = AutoProcessor.from_pretrained(
-            model_config.name,
-            trust_remote_code=True
-        )
-        
-        # Configure processor
-        processor.patch_size = model_config.patch_size
-        processor.vision_feature_select_strategy = 'default'
-        processor.tokenizer.padding_side = 'right'
-        
-        # Load model using specific class
+        # Load and configure model
         logger.info("Loading model...")
-        model = LlavaNextForConditionalGeneration.from_pretrained(  # Changed this line
+        model = LlavaNextForConditionalGeneration.from_pretrained(
             model_config.name,
             quantization_config=quantization_config,
             torch_dtype=torch.float16,
-            device_map="auto",  # Simplified device mapping
+            device_map="auto",
             trust_remote_code=True,
             low_cpu_mem_usage=True
         )
         
-        # Configure model
+        # Configure model for training
+        model.config.use_cache = False  # Required for gradient checkpointing
+        model.config.padding_side = 'right'  # For training
         model.padding_side = 'right'
-        model.config.padding_side = 'right'
-        model.config.use_cache = False
         
-        # Enable gradient checkpointing
         if hasattr(model, "gradient_checkpointing_enable"):
             model.gradient_checkpointing_enable()
             logger.info("Gradient checkpointing enabled")
+        
+        # Ensure model knows about processor configuration
+        model.config.vision_config.patch_size = model_config.patch_size
+        model.config.vision_config.image_size = model_config.image_size
+        model.config.vision_feature_select_strategy = 'default'
+        
+        # Log model configuration
+        logger.info("Model configuration:")
+        logger.info(f"  padding_side: {model.padding_side}")
+        logger.info(f"  use_cache: {model.config.use_cache}")
+        logger.info(f"  patch_size: {model.config.vision_config.patch_size}")
+        logger.info(f"  image_size: {model.config.vision_config.image_size}")
         
         return model, processor
         
@@ -166,6 +203,29 @@ def prepare_datasets(processor, data_config: DataConfig, image_size: int, args):
         logger.error(traceback.format_exc())
         raise
 
+def validate_configurations(model, processor):
+    """Validate model and processor configurations match."""
+    logger = logging.getLogger(__name__)
+    
+    # Check processor configuration
+    assert hasattr(processor, 'patch_size'), "Processor missing patch_size"
+    assert hasattr(processor, 'vision_feature_select_strategy'), "Processor missing vision_feature_select_strategy"
+    assert processor.tokenizer.padding_side == 'right', "Incorrect tokenizer padding side"
+    
+    # Check model configuration
+    assert model.config.padding_side == 'right', "Incorrect model padding side"
+    assert not model.config.use_cache, "use_cache should be False for training"
+    
+    logger.info("Configuration validation passed")
+
+def prepare_for_inference(model, processor):
+    """Prepare model and processor for inference by setting left padding."""
+    model.config.padding_side = 'left'
+    model.padding_side = 'left'
+    processor.tokenizer.padding_side = 'left'
+    model.config.use_cache = True  # Enable cache for inference
+    return model, processor
+
 def train_llava_model(args):
     """Main training function with enhanced error handling and dataset validation"""
     try:
@@ -203,7 +263,10 @@ def train_llava_model(args):
         # Setup model and processor
         model, processor = setup_model_and_processor(model_config, args)
         
-        # Prepare datasets
+        # Validate configurations
+        validate_configurations(model, processor)
+        
+        # Prepare datasets with validated processor
         train_dataset, eval_dataset, class_weights = prepare_datasets(
             processor,
             data_config,
@@ -219,6 +282,7 @@ def train_llava_model(args):
             data_config
         )
         
+        # Create trainer with validated model and processor
         trainer = CustomTrainer(
             model=model,
             args=training_args,

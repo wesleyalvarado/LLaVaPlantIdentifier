@@ -60,7 +60,7 @@ def get_training_args(
     optim_config: OptimizationConfig,
     data_config: DataConfig
 ) -> TrainingArguments:
-    """Get training arguments with memory-efficient settings."""
+    """Get training arguments with proper precision settings."""
     
     os.makedirs(model_dir, exist_ok=True)
     if model_config.checkpoint_dir:
@@ -78,26 +78,32 @@ def get_training_args(
         warmup_ratio=optim_config.warmup_ratio,
         num_train_epochs=optim_config.num_train_epochs,
         
-        # Evaluation
+        # Evaluation settings
         eval_steps=model_config.eval_steps,
-        eval_strategy="steps",  # Changed from eval_strategy
+        evaluation_strategy="steps",
         save_steps=model_config.save_steps,
         save_strategy="steps",
         save_total_limit=model_config.save_total_limit,
         
+        # Precision settings
+        fp16=True,  # Enable mixed precision training
+        fp16_opt_level="O1",  # Conservative mixed precision
+        fp16_backend="auto",
+        
         # Memory optimization
         gradient_checkpointing=model_config.gradient_checkpointing,
-        fp16=True,
         dataloader_num_workers=data_config.num_workers,
         dataloader_pin_memory=data_config.pin_memory,
         
-        # Optimizer
+        # Optimizer settings
         optim="adamw_torch",
         
-        # Misc
+        # Logging
         logging_steps=10,
         logging_dir=os.path.join(model_dir, "logs"),
         report_to=["tensorboard"],
+        
+        # Misc
         remove_unused_columns=False,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",

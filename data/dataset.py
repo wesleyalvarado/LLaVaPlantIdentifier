@@ -107,10 +107,10 @@ class MemoryEfficientPlantDataset(Dataset):
 
     def _process_single_sample(self, idx: int) -> Optional[Dict[str, Any]]:
         """Process a single dataset sample.
-        
+            
         Args:
             idx: Sample index
-                
+                    
         Returns:
             Processed sample dictionary or None if processing fails
         """
@@ -119,31 +119,34 @@ class MemoryEfficientPlantDataset(Dataset):
             cached = self._load_from_cache(idx)
             if cached is not None:
                 return cached
-                
+                    
             item = self.dataset[idx]
-            
+                
             # Create text inputs as explicit strings
             prompt = str("<image>\nWhat type of flower is shown in this image? Please identify the flower species.")
             target = str(f"This image shows a flower of class {self.class_names[item['label']]}.")
-            
+                
             # Process image and ensure single view
             image = item['image']
             if isinstance(image, (list, tuple)):
                 image = image[0]  # Take first image if multiple views
-                    
+                        
+            # Process image with explicit size
             image_inputs = self.processor.image_processor(
                 image,
-                return_tensors="pt"
+                return_tensors="pt",
+                size={'height': self.image_size, 'width': self.image_size}
             )
-            
-            # Handle multiple views - take only the first view
+                
+            # Handle multiple views in pixel values
             pixel_values = image_inputs['pixel_values']
-            if len(pixel_values.shape) >= 4:
-                logger.info(f"Original pixel_values shape: {pixel_values.shape}")
-                # If shape is [1, 5, 3, 336, 336], we want [3, 336, 336]
-                pixel_values = pixel_values.squeeze(0)[0]  # Take first view
+            logger.info(f"Original pixel_values shape: {pixel_values.shape}")
+                
+            # If we have shape [1, 5, 3, H, W], take the first view
+            if len(pixel_values.shape) >= 4 and pixel_values.shape[1] == 5:
+                pixel_values = pixel_values.squeeze(0)[0]  # Take first view only
                 logger.info(f"Reshaped pixel_values to: {pixel_values.shape}")
-            
+                
             # Process text input using explicit string
             text_inputs = self.processor.tokenizer(
                 text=prompt,  # Explicit text parameter
@@ -152,7 +155,7 @@ class MemoryEfficientPlantDataset(Dataset):
                 max_length=self.max_length,
                 return_tensors=None
             )
-            
+                
             # Process target text
             label_inputs = self.processor.tokenizer(
                 text=target,  # Explicit text parameter
@@ -161,7 +164,7 @@ class MemoryEfficientPlantDataset(Dataset):
                 max_length=self.max_length,
                 return_tensors=None
             )
-            
+                
             # Create input dictionary
             inputs = {
                 'pixel_values': pixel_values.to(self.device).to(torch.float16),
@@ -174,7 +177,7 @@ class MemoryEfficientPlantDataset(Dataset):
                 'prompt': prompt,
                 'target': target
             }
-                        
+                            
             # Debug first sample
             if idx == 0:
                 logger.info("First sample shape information:")
@@ -184,16 +187,16 @@ class MemoryEfficientPlantDataset(Dataset):
                         if key == 'input_ids':
                             num_image_tokens = (value == self.image_token_id).sum().item()
                             logger.info(f"  Number of image tokens: {num_image_tokens}")
-            
+                
             # Cache processed sample
             self._save_to_cache(idx, inputs)
-            
-            return inputs
                 
+            return inputs
+                    
         except Exception as e:
             logger.error(f"Error processing sample {idx}: {e}")
             return None
-
+    
     def _process_samples(self):
         """Process all samples and store results."""
         for idx in range(len(self.dataset)):

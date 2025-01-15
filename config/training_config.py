@@ -29,18 +29,18 @@ class ModelConfig:
 @dataclass
 class OptimizationConfig:
     """Configuration for training optimization."""
-    learning_rate: float = 1e-5
+    learning_rate: float = 1e-6  # Even lower learning rate
     weight_decay: float = 0.01
-    warmup_ratio: float = 0.1
-    max_grad_norm: float = 1.0
-    gradient_accumulation_steps: int = 8
+    warmup_ratio: float = 0.2    # Changed from 0.1
+    max_grad_norm: float = 0.5   # Changed from 1.0
+    gradient_accumulation_steps: int = 4  # Changed from 8
     num_train_epochs: int = 3
     max_steps: int = 1000
     early_stopping_patience: int = 3
     early_stopping_threshold: float = 0.01
     use_8bit_quantization: bool = False
     use_4bit_quantization: bool = True
-    bnb_4bit_compute_dtype: str = "float16"
+    bnb_4bit_compute_dtype: str = "float32"  # Changed to float32
     bnb_4bit_quant_type: str = "nf4"
 
 @dataclass

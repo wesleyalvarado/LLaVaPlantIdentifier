@@ -10,7 +10,7 @@ import gc
 import numpy as np
 from tqdm import tqdm
 from transformers import get_linear_schedule_with_warmup
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler  # Changed from torch.cuda.amp
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,16 @@ class CustomTrainer:
             
         # Log initial configuration
         self._log_model_config()
+    
+    def _validate_gradients(self, model: nn.Module) -> bool:
+        """Check gradients for invalid values."""
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                valid = not bool(torch.isnan(param.grad).any() or torch.isinf(param.grad).any())
+                if not valid:
+                    logger.warning(f"Invalid gradients in {name}")
+                    return False
+        return True
     
     def on_evaluate(self, metrics: Dict[str, float]):
         """Handle evaluation callbacks."""
@@ -114,10 +124,10 @@ class CustomTrainer:
                 logger.info(f"  image_token_index: {self.model.config.image_token_index}")
 
     def compute_loss(self, model_outputs: Any, labels: torch.Tensor) -> torch.Tensor:
-        """Compute loss for LLaVA text generation."""
+        """Compute loss with improved numerical stability."""
         try:
-            # Get logits and convert to float32
-            logits = model_outputs.logits.float()
+            # Get logits and convert to float32 for stability
+            logits = model_outputs.logits.to(torch.float32)
             labels = labels.to(logits.device).long()
 
             # Get shapes
@@ -129,7 +139,7 @@ class CustomTrainer:
                 labels = torch.nn.functional.pad(
                     labels, 
                     (0, seq_length - label_length),
-                    value=-100  # Padding token
+                    value=-100
                 )
             else:
                 labels = labels[:, :seq_length]
@@ -138,17 +148,25 @@ class CustomTrainer:
             logits = logits.reshape(-1, vocab_size)
             labels = labels.reshape(-1)
 
-            # Simple CrossEntropyLoss for text generation
+            # Apply label smoothing and loss scaling
             loss_fct = nn.CrossEntropyLoss(
                 ignore_index=-100,
                 reduction='mean',
                 label_smoothing=0.1
             )
 
-            # Compute loss
+            # Compute scaled loss
             loss = loss_fct(logits, labels)
 
-            # Log detailed stats for debugging
+            # Add loss scaling factor
+            loss = loss / self.args.gradient_accumulation_steps
+
+            # Validate loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.error(f"Invalid loss detected!")
+                return None
+
+            # Log stats for debugging
             if loss is not None:
                 with torch.no_grad():
                     logger.debug(f"Loss computation stats:")
@@ -156,13 +174,6 @@ class CustomTrainer:
                     logger.debug(f"  Logits shape: {logits.shape}")
                     logger.debug(f"  Labels shape: {labels.shape}")
                     logger.debug(f"  Logits min/max: {logits.min().item():.4f}/{logits.max().item():.4f}")
-                    probs = torch.softmax(logits, dim=-1)
-                    logger.debug(f"  Probability min/max: {probs.min().item():.4f}/{probs.max().item():.4f}")
-
-            # Validate loss
-            if torch.isnan(loss) or torch.isinf(loss):
-                logger.error(f"Invalid loss detected!")
-                return None
 
             return loss
 
@@ -261,43 +272,28 @@ class CustomTrainer:
             }
 
             # Forward pass
-            with torch.amp.autocast(device_type='cuda', dtype=torch.float32, enabled=True):
-                outputs = model(**model_inputs)
+            outputs = model(**model_inputs)
+            if hasattr(outputs, 'loss'):
+                loss = outputs.loss
+            else:
+                loss = self.compute_loss(outputs, model_inputs['labels'])
                 
-                # Get loss from model outputs or compute it
-                if hasattr(outputs, 'loss'):
-                    loss = outputs.loss
-                else:
-                    loss = self.compute_loss(outputs, model_inputs['labels'])
+            # Validate loss before proceeding
+            if loss is None or torch.isnan(loss) or torch.isinf(loss):
+                logger.error(f"Invalid loss detected: {loss}")
+                return None
                 
-                # Validate loss before proceeding
-                if loss is None or torch.isnan(loss) or torch.isinf(loss):
-                    logger.error(f"Invalid loss detected: {loss}")
-                    return None
+            logger.debug(f"Loss value: {loss.item()}")
                 
-                logger.debug(f"Loss value: {loss.item()}")
-                
-                # Scale loss for gradient accumulation
-                if self.args.gradient_accumulation_steps > 1:
-                    loss = loss / self.args.gradient_accumulation_steps
+            # Scale loss for gradient accumulation
+            if self.args.gradient_accumulation_steps > 1:
+                loss = loss / self.args.gradient_accumulation_steps
 
             # Backward pass
             loss.backward()
 
             # Validate gradients
-            valid_gradients = True
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any():
-                        logger.error(f"NaN gradient detected in {name}")
-                        valid_gradients = False
-                        break
-                    if torch.isinf(param.grad).any():
-                        logger.error(f"Infinite gradient detected in {name}")
-                        valid_gradients = False
-                        break
-
-            if not valid_gradients:
+            if not self._validate_gradients(model):
                 return None
 
             # Apply gradient clipping
@@ -312,13 +308,16 @@ class CustomTrainer:
                     logger.error(f"Gradient clipping failed: {e}")
                     return None
 
+            self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
+
             return loss.detach()
 
         except Exception as e:
             logger.error(f"Error in training step: {e}")
             logger.error(traceback.format_exc())
             return None
-
+    
     def _save_checkpoint(self, epoch: int, step: int, save_dir: str):
         """Save training checkpoint."""
         checkpoint = {

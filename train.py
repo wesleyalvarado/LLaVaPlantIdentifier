@@ -99,7 +99,11 @@ def setup_model_and_processor(model_config: ModelConfig, args):
         processor.config.vision_feature_select_strategy = 'default'
         processor.config.image_size = model_config.image_size
         
-        # Configure quantization - modified part
+        # Add these explicitly to avoid deprecation warning
+        processor.patch_size = model_config.patch_size
+        processor.vision_feature_select_strategy = 'default'
+        
+        # Configure quantization
         compute_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -121,7 +125,7 @@ def setup_model_and_processor(model_config: ModelConfig, args):
         )
         
         # Configure model
-        model.config.use_cache = False
+        model.config.use_cache = False  # Disable cache for training
         model.config.padding_side = 'right'
         model.padding_side = 'right'
         model.config.vision_config.patch_size = model_config.patch_size
@@ -132,6 +136,11 @@ def setup_model_and_processor(model_config: ModelConfig, args):
         if hasattr(model, "gradient_checkpointing_enable"):
             model.gradient_checkpointing_enable()
             logger.info("Gradient checkpointing enabled")
+        
+        # Freeze vision tower to stabilize training
+        logger.info("Freezing vision tower parameters...")
+        for param in model.vision_tower.parameters():
+            param.requires_grad = False
         
         logger.info(f"Model loaded with compute dtype: {compute_dtype}")
         return model, processor

@@ -50,7 +50,7 @@ class CustomTrainer:
         self.scheduler = self._create_scheduler()
         
         # Initialize gradient scaler for mixed precision
-        self.scaler = torch.cuda.amp.GradScaler()
+        self.scaler = torch.amp.GradScaler('cuda')
         
         # Training state
         self.global_step = 0
@@ -239,21 +239,37 @@ class CustomTrainer:
                 B, C = pixel_values.shape[:2]
                 pixel_values = pixel_values.unsqueeze(1).expand(-1, num_patches, -1, -1, -1)
                 logger.debug(f"Reshaped pixel_values: {pixel_values.shape}")
+
+            # Ensure input_ids has a valid shape
+            if 'input_ids' in inputs:
+                input_ids = inputs['input_ids'].clone().detach().to(self.device)
+                if len(input_ids.shape) == 1:  # Add batch dimension if it's missing
+                    input_ids = input_ids.unsqueeze(0)
+            else:
+                raise ValueError("Missing 'input_ids' in inputs.")
             
+            if 'attention_mask' in inputs:
+                attention_mask = inputs['attention_mask'] = ensure_2d(inputs['attention_mask']).to(self.device)
+            
+            if 'labels' in inputs:
+                labels = inputs['labels'] = ensure_2d(inputs['labels']).to(self.device)
+
             # Create model inputs
             model_inputs = {
                 'pixel_values': pixel_values,
-                'input_ids': inputs['input_ids'].to(self.device),
-                'attention_mask': inputs['attention_mask'].to(self.device),
-                'labels': inputs['labels'].to(self.device).to(torch.long),
+                'input_ids': input_ids,
+                'attention_mask': attention_mask,
+                'labels': labels.to(torch.long),
                 'image_sizes': torch.tensor([[336, 336]], device=self.device, dtype=torch.long),
                 'vision_feature_layer': -2,
                 'vision_feature_select_strategy': 'default'
             }
+
+            valid_model_inputs = {key: value for key, value in model_inputs.items() if key in ['input_ids', 'attention_mask', 'pixel_values', 'image_sizes', 'labels', 'position_ids', 'past_key_values', 'inputs_embeds', 'vision_feature_layer', 'vision_feature_select_strategy', 'use_cache', 'output_attentions', 'output_hidden_states', 'return_dict', 'cache_position', 'num_logits_to_keep']}
             
             # Forward pass with mixed precision
             with torch.amp.autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
-                outputs = model(**model_inputs)
+                outputs = model(**valid_model_inputs)
                 loss = self.compute_loss(outputs, model_inputs['labels'])
                 
                 # Handle None loss
@@ -494,3 +510,11 @@ class CustomTrainer:
         except Exception as e:
             logger.error(f"Error saving model: {str(e)}")
             raise
+
+    
+def ensure_2d(tensor):
+    """Ensure tensor is at least 2D (add batch dimension if necessary)."""
+    if len(tensor.shape) == 1:  # If the tensor is 1D
+        tensor = tensor.unsqueeze(0)  # Add batch dimension
+    return tensor
+

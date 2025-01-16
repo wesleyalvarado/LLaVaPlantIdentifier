@@ -71,64 +71,65 @@ class CustomTrainer:
                 torch.mps.synchronize()
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Any]) -> Optional[torch.Tensor]:
-        """Perform a training step with Mac-specific optimizations."""
+        """Perform a training step."""
         try:
-            # Memory cleanup before step
-            self._cleanup_memory()
-            
             # Set model to training mode
             model.train()
             
-            # Process inputs
-            pixel_values = inputs['pixel_values'].to(self.device)
-            input_ids = inputs['input_ids'].to(self.device)
-            attention_mask = inputs['attention_mask'].to(self.device)
-            labels = inputs['labels'].to(self.device)
+            # Process inputs with correct shapes
+            input_ids = inputs['input_ids'].unsqueeze(0) if len(inputs['input_ids'].shape) == 1 else inputs['input_ids']
+            attention_mask = inputs['attention_mask'].unsqueeze(0) if len(inputs['attention_mask'].shape) == 1 else inputs['attention_mask']
+            labels = inputs['labels'].unsqueeze(0) if len(inputs['labels'].shape) == 1 else inputs['labels']
+            
+            # Fix pixel_values shape: should be [batch_size, num_images=1, channels=3, height, width]
+            pixel_values = inputs['pixel_values']
+            if len(pixel_values.shape) == 3:  # [C, H, W]
+                pixel_values = pixel_values.unsqueeze(0)  # [1, C, H, W]
+            if len(pixel_values.shape) == 4:  # [B or N, C, H, W]
+                if pixel_values.shape[0] != 1:
+                    # If first dimension is not batch size, it's probably num_images
+                    pixel_values = pixel_values.unsqueeze(0)  # Add batch dimension
+                else:
+                    # If first dimension is batch size, add num_images dimension
+                    pixel_values = pixel_values.unsqueeze(1)  # [B, 1, C, H, W]
+            
+            # Move to device
+            input_ids = input_ids.to(self.device)
+            attention_mask = attention_mask.to(self.device)
+            labels = labels.to(self.device)
+            pixel_values = pixel_values.to(self.device)
+            
+            # Debug tensor shapes
+            logger.info(f"input_ids shape: {input_ids.shape}")
+            logger.info(f"attention_mask shape: {attention_mask.shape}")
+            logger.info(f"labels shape: {labels.shape}")
+            logger.info(f"pixel_values shape: {pixel_values.shape}")
             
             # Create model inputs
             model_inputs = {
-                'pixel_values': pixel_values,
                 'input_ids': input_ids,
                 'attention_mask': attention_mask,
                 'labels': labels,
-                'image_sizes': torch.tensor([[336, 336]], device=self.device),
-                'return_dict': True
+                'pixel_values': pixel_values,
+                'return_dict': True,
+                'image_sizes': torch.tensor([[336, 336]], device=self.device)  # Add this
             }
 
-            # Forward pass - no autocast for MPS
+            # Forward pass
             outputs = model(**model_inputs)
-            if hasattr(outputs, 'loss'):
-                loss = outputs.loss
-            else:
-                loss = self.compute_loss(outputs, model_inputs['labels'])
-                
-            # Validate loss
-            if loss is None or torch.isnan(loss) or torch.isinf(loss):
-                logger.error(f"Invalid loss detected: {loss}")
-                return None
-                
+            loss = outputs.loss
+
             # Scale loss for gradient accumulation
             if self.args.gradient_accumulation_steps > 1:
-                loss = loss / self.args.gradient_accumulation_steps            
+                loss = loss / self.args.gradient_accumulation_steps
 
             # Backward pass
             loss.backward()
-            
-            # Gradient clipping
-            if self.args.max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    self.args.max_grad_norm,
-                    error_if_nonfinite=True
-                )
 
             # Optimizer step
             self.optimizer.step()
             self.scheduler.step()
-            self.optimizer.zero_grad(set_to_none=True)
-            
-            # Memory cleanup after step
-            self._cleanup_memory()
+            self.optimizer.zero_grad()
 
             return loss.detach()
 
@@ -241,6 +242,19 @@ class CustomTrainer:
             num_workers=2,  # Reduced for Mac
             pin_memory=True
         )
+    
+    def _cleanup_memory(self):
+        """Clean up memory explicitly."""
+        gc.collect()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
+    @property
+    def image_size(self):
+        """Get image size from model config."""
+        if hasattr(self.model.config, 'vision_config'):
+            return self.model.config.vision_config.image_size
+        return 336  # Default size
 
     def get_eval_dataloader(self) -> DataLoader:
         """Get evaluation dataloader with Mac-optimized settings."""
@@ -251,6 +265,60 @@ class CustomTrainer:
             num_workers=2,  # Reduced for Mac
             pin_memory=True
         )
+
+    def _create_optimizer(self) -> torch.optim.Optimizer:
+        """Create optimizer with proper parameter grouping."""
+        no_decay = ["bias", "LayerNorm.weight"]
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in self.model.named_parameters() 
+                        if not any(nd in n for nd in no_decay)],
+                "weight_decay": self.args.weight_decay,
+            },
+            {
+                "params": [p for n, p in self.model.named_parameters() 
+                        if any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+            },
+        ]
+        
+        return torch.optim.AdamW(
+            optimizer_grouped_parameters,
+            lr=self.args.learning_rate,
+            betas=(0.9, 0.999),
+            eps=1e-8
+        )
+    
+    def _create_scheduler(self) -> torch.optim.lr_scheduler.LambdaLR:
+        """Create learning rate scheduler."""
+        if not hasattr(self, 'train_dataset') or self.train_dataset is None:
+            return get_linear_schedule_with_warmup(
+                self.optimizer,
+                num_warmup_steps=100,
+                num_training_steps=1000
+            )
+        
+        num_training_steps = len(self.train_dataset) * self.args.num_train_epochs
+        num_warmup_steps = int(num_training_steps * self.args.warmup_ratio)
+        
+        return get_linear_schedule_with_warmup(
+            self.optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps
+        )
+    
+    def _log_model_config(self):
+        """Log important model configuration parameters."""
+        if hasattr(self.model, 'config'):
+            logger.info("Model Configuration:")
+            if hasattr(self.model.config, 'image_grid_pinpoints'):
+                logger.info(f"  image_grid_pinpoints: {self.model.config.image_grid_pinpoints}")
+            if hasattr(self.model.config, 'vision_config'):
+                logger.info(f"  vision_config.image_size: {self.model.config.vision_config.image_size}")
+                if hasattr(self.model.config.vision_config, 'patch_size'):
+                    logger.info(f"  vision_config.patch_size: {self.model.config.vision_config.patch_size}")
+            if hasattr(self.model.config, 'image_token_index'):
+                logger.info(f"  image_token_index: {self.model.config.image_token_index}")
 
     def save_model(self, output_dir: str):
         """Save model with Mac-specific handling."""

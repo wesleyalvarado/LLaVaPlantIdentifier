@@ -15,6 +15,7 @@ from transformers import (
 import logging
 from torch.utils.data import DataLoader
 from transformers import EarlyStoppingCallback
+from utils.model_optimizer import ModelOptimizer
 
 
 # Set environment variables
@@ -254,6 +255,13 @@ def train_llava_model(args):
         
         # Setup model and processor
         model, processor = setup_model_and_processor(model_config, args)
+
+        # Memory Optimization
+        model = ModelOptimizer.optimize_memory_usage(model)
+        model = ModelOptimizer.optimize_training_settings(model)
+        model = ModelOptimizer.setup_mixed_precision(model)
+        model = ModelOptimizer.optimize_batch_processing(model)
+        
         
         # Validate configurations
         validate_configurations(model, processor)
@@ -273,7 +281,7 @@ def train_llava_model(args):
             optim_config,
             data_config
         )
-        
+
         # Create trainer with validated model and processor
         trainer = CustomTrainer(
             model=model,
@@ -283,7 +291,7 @@ def train_llava_model(args):
             class_weights=class_weights,
             callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
         )
-        
+
         # Start training
         logger.info("Beginning model training...")
         trainer.train(resume_from_checkpoint=args.resume_from)

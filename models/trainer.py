@@ -44,6 +44,7 @@ class CustomTrainer:
         self.device = next(model.parameters()).device
         self.class_weights = class_weights.to(self.device) if class_weights is not None else None
         self.callbacks = callbacks or []
+        self.scaler = GradScaler(enabled=self.args.fp16)
         
         # Initialize optimizer and scheduler
         self.optimizer = self._create_optimizer()
@@ -272,25 +273,39 @@ class CustomTrainer:
             }
 
             # Forward pass
-            outputs = model(**model_inputs)
-            if hasattr(outputs, 'loss'):
-                loss = outputs.loss
-            else:
-                loss = self.compute_loss(outputs, model_inputs['labels'])
-                
-            # Validate loss before proceeding
-            if loss is None or torch.isnan(loss) or torch.isinf(loss):
-                logger.error(f"Invalid loss detected: {loss}")
-                return None
-                
-            logger.debug(f"Loss value: {loss.item()}")
-                
-            # Scale loss for gradient accumulation
-            if self.args.gradient_accumulation_steps > 1:
-                loss = loss / self.args.gradient_accumulation_steps
+            device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+            with autocast(device_type=device_type, enabled=self.args.fp16):
+                outputs = model(**model_inputs)
+                if hasattr(outputs, 'loss'):
+                    loss = outputs.loss
+                else:
+                    loss = self.compute_loss(outputs, model_inputs['labels'])
+                    
+                # Validate loss before proceeding
+                if loss is None or torch.isnan(loss) or torch.isinf(loss):
+                    logger.error(f"Invalid loss detected: {loss}")
+                    return None
+                    
+                logger.debug(f"Loss value: {loss.item()}")
+                    
+                # Scale loss for gradient accumulation
+                if self.args.gradient_accumulation_steps > 1:
+                    loss = loss / self.args.gradient_accumulation_steps            
 
             # Backward pass
-            loss.backward()
+            self.scaler.scale(loss).backward()
+            
+            if self.args.max_grad_norm > 0:
+                self.scaler.unscale_(self.optimizer)
+                try:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        self.args.max_grad_norm,
+                        error_if_nonfinite=True
+                    )
+                except RuntimeError as e:
+                    logger.error(f"Gradient clipping failed: {e}")
+                    return None
 
             # Validate gradients
             if not self._validate_gradients(model):
@@ -307,8 +322,10 @@ class CustomTrainer:
                 except RuntimeError as e:
                     logger.error(f"Gradient clipping failed: {e}")
                     return None
-
-            self.optimizer.step()
+                
+            # Optimizer step with gradient scaling
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             self.optimizer.zero_grad(set_to_none=True)
 
             return loss.detach()

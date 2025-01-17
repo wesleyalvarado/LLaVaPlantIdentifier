@@ -69,17 +69,20 @@ def cleanup_test_environment():
         logger.error(f"Error in cleanup: {e}")
 
 def load_model_for_testing(model_config: ModelConfig, device):
-    """Load model with Mac-optimized settings."""
+    """Load model with proper type configuration."""
     try:
         logger.info(f"Loading model using device: {device}")
         
-        # Load model with basic settings
+        # Load model with float32 as base type
         model = LlavaNextForConditionalGeneration.from_pretrained(
             model_config.name,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,  # Changed from float16
             trust_remote_code=True,
             low_cpu_mem_usage=True
         )
+        
+        # Convert model parameters to float32
+        model = model.to(dtype=torch.float32)
         
         # Move model to device
         model = model.to(device)
@@ -88,7 +91,7 @@ def load_model_for_testing(model_config: ModelConfig, device):
         if hasattr(model, "gradient_checkpointing_enable"):
             model.gradient_checkpointing_enable()
             logger.info("Gradient checkpointing enabled")
-        
+            
         return model
     except Exception as e:
         logger.error(f"Error loading model: {e}")

@@ -71,39 +71,34 @@ class CustomTrainer:
                 torch.mps.synchronize()
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Any]) -> Optional[torch.Tensor]:
-        """Perform a training step."""
+        """Perform a training step with proper type handling."""
         try:
             # Set model to training mode
             model.train()
             
-            # Process inputs with correct shapes
+            # Convert pixel_values to float32 and handle shape
+            pixel_values = inputs['pixel_values'].to(dtype=torch.float32)
+            if len(pixel_values.shape) == 3:  # [C, H, W]
+                pixel_values = pixel_values.unsqueeze(0).unsqueeze(0)  # [1, 1, C, H, W]
+            elif len(pixel_values.shape) == 4:  # [B, C, H, W]
+                pixel_values = pixel_values.unsqueeze(1)  # [B, 1, C, H, W]
+            
+            # Convert input tensors to appropriate types
             input_ids = inputs['input_ids'].unsqueeze(0) if len(inputs['input_ids'].shape) == 1 else inputs['input_ids']
             attention_mask = inputs['attention_mask'].unsqueeze(0) if len(inputs['attention_mask'].shape) == 1 else inputs['attention_mask']
             labels = inputs['labels'].unsqueeze(0) if len(inputs['labels'].shape) == 1 else inputs['labels']
             
-            # Fix pixel_values shape: should be [batch_size, num_images=1, channels=3, height, width]
-            pixel_values = inputs['pixel_values']
-            if len(pixel_values.shape) == 3:  # [C, H, W]
-                pixel_values = pixel_values.unsqueeze(0)  # [1, C, H, W]
-            if len(pixel_values.shape) == 4:  # [B or N, C, H, W]
-                if pixel_values.shape[0] != 1:
-                    # If first dimension is not batch size, it's probably num_images
-                    pixel_values = pixel_values.unsqueeze(0)  # Add batch dimension
-                else:
-                    # If first dimension is batch size, add num_images dimension
-                    pixel_values = pixel_values.unsqueeze(1)  # [B, 1, C, H, W]
-            
-            # Move to device
-            input_ids = input_ids.to(self.device)
-            attention_mask = attention_mask.to(self.device)
-            labels = labels.to(self.device)
+            # Move to device and set types
+            input_ids = input_ids.to(self.device, dtype=torch.long)
+            attention_mask = attention_mask.to(self.device, dtype=torch.long)
+            labels = labels.to(self.device, dtype=torch.long)
             pixel_values = pixel_values.to(self.device)
             
-            # Debug tensor shapes
-            logger.info(f"input_ids shape: {input_ids.shape}")
-            logger.info(f"attention_mask shape: {attention_mask.shape}")
-            logger.info(f"labels shape: {labels.shape}")
-            logger.info(f"pixel_values shape: {pixel_values.shape}")
+            # Debug shapes and types
+            logger.info(f"input_ids shape: {input_ids.shape}, dtype: {input_ids.dtype}")
+            logger.info(f"attention_mask shape: {attention_mask.shape}, dtype: {attention_mask.dtype}")
+            logger.info(f"labels shape: {labels.shape}, dtype: {labels.dtype}")
+            logger.info(f"pixel_values shape: {pixel_values.shape}, dtype: {pixel_values.dtype}")
             
             # Create model inputs
             model_inputs = {
@@ -112,32 +107,50 @@ class CustomTrainer:
                 'labels': labels,
                 'pixel_values': pixel_values,
                 'return_dict': True,
-                'image_sizes': torch.tensor([[336, 336]], device=self.device)  # Add this
+                'image_sizes': torch.tensor([[336, 336]], device=self.device, dtype=torch.long)
             }
+            
+            # Debug model parameter types
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    logger.debug(f"Parameter {name}: dtype={param.dtype}, device={param.device}")
 
             # Forward pass
             outputs = model(**model_inputs)
+            
+            # Convert loss to float32 if needed
             loss = outputs.loss
-
-            # Scale loss for gradient accumulation
+            if loss.dtype != torch.float32:
+                loss = loss.to(torch.float32)
+            
+            # Scale loss
             if self.args.gradient_accumulation_steps > 1:
                 loss = loss / self.args.gradient_accumulation_steps
+                
+            # Clear any existing gradients
+            model.zero_grad()
 
             # Backward pass
             loss.backward()
 
-            # Optimizer step
+            # Clip gradients
+            if self.args.max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
+
+            # Update weights
             self.optimizer.step()
             self.scheduler.step()
-            self.optimizer.zero_grad()
-
+            
+            # Clear gradients
+            model.zero_grad(set_to_none=True)
+            
             return loss.detach()
 
         except Exception as e:
             logger.error(f"Error in training step: {e}")
             logger.error(traceback.format_exc())
             return None
-
+                
     def evaluate(self) -> Dict[str, float]:
         """Run evaluation with Mac-specific optimizations."""
         self.model.eval()

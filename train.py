@@ -48,6 +48,8 @@ def parse_arguments():
                        help='Number of gradient accumulation steps')
     parser.add_argument('--learning_rate', type=float, default=1e-5,
                        help='Learning rate')
+    parser.add_argument('--warmup_ratio', type=float, default=0.2,
+                       help='Ratio of total training steps to use for warmup')
     
     # Model parameters
     parser.add_argument('--model_name', type=str, 
@@ -68,7 +70,6 @@ def parse_arguments():
     
     return parser.parse_args()
 
-
 def setup_model_and_processor(model_config: ModelConfig, args):
     """Setup model and processor with proper configuration."""
     try:
@@ -82,23 +83,21 @@ def setup_model_and_processor(model_config: ModelConfig, args):
         )
         
         # Configure processor explicitly
-        processor.image_processor.patch_size = model_config.patch_size
+        processor.image_processor.patch_size = 14
         processor.image_processor.vision_feature_select_strategy = 'default'
-        processor.image_processor.size = {
-            'height': model_config.image_size,
-            'width': model_config.image_size
-        }
-        
+        if hasattr(processor, 'image_processor'):
+            processor.image_processor.patch_size = 14
+            processor.image_processor.vision_feature_select_strategy = 'default'
+            processor.image_processor.size = {'height': 336, 'width': 336}
+
         # Set padding side consistently for training
         processor.tokenizer.padding_side = 'right'
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        
-        # Update processor config
-        if not hasattr(processor, 'config'):
-            processor.config = type('ProcessorConfig', (), {})()
-        processor.config.patch_size = model_config.patch_size
-        processor.config.vision_feature_select_strategy = 'default'
-        processor.config.image_size = model_config.image_size
+
+        # Update processor config if it exists
+        if hasattr(processor, 'config'):
+            processor.config.patch_size = 14
+            processor.config.vision_feature_select_strategy = 'default'
         
         # Add these explicitly to avoid deprecation warning
         processor.patch_size = model_config.patch_size
@@ -142,6 +141,12 @@ def setup_model_and_processor(model_config: ModelConfig, args):
         logger.info("Freezing vision tower parameters...")
         for param in model.vision_tower.parameters():
             param.requires_grad = False
+
+
+        # Enable gradients for non-frozen parameters
+        for name, param in model.named_parameters():
+            if 'vision_tower' not in name and param.dtype in [torch.float16, torch.float32, torch.bfloat16]:
+                param.requires_grad = True
         
         logger.info(f"Model loaded with compute dtype: {compute_dtype}")
         return model, processor

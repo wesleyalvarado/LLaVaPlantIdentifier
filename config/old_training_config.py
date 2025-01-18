@@ -34,7 +34,8 @@ def get_training_args(model_dir: str) -> TrainingArguments:
         learning_rate=1e-5,
         num_train_epochs=3,
         warmup_ratio=0.1,
-        fp16=True,
+        fp16=False,  # Disable fp16
+        bf16=True,   # Use bf16 instead if available
         dataloader_num_workers=0,
         dataloader_pin_memory=False,
         optim="adamw_torch",

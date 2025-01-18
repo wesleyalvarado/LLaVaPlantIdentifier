@@ -246,10 +246,18 @@ class CustomTrainer:
                 pixel_values = pixel_values.unsqueeze(1).expand(-1, num_patches, -1, -1, -1)
                 logger.debug(f"Reshaped pixel_values: {pixel_values.shape}")
 
-            # Get other inputs
+            # Get other inputs and ensure they have batch dimension
             input_ids = inputs['input_ids'].to(self.device)
+            if input_ids.dim() == 1:
+                input_ids = input_ids.unsqueeze(0)
+                
             attention_mask = inputs['attention_mask'].to(self.device)
-            labels = inputs['labels'].to(self.device).long()  # Ensure long dtype for labels
+            if attention_mask.dim() == 1:
+                attention_mask = attention_mask.unsqueeze(0)
+                
+            labels = inputs['labels'].to(self.device)
+            if labels.dim() == 1:
+                labels = labels.unsqueeze(0)
 
             # Validate inputs
             if torch.isnan(pixel_values).any():
@@ -267,10 +275,14 @@ class CustomTrainer:
                 'attention_mask': attention_mask,
                 'labels': labels,
                 'image_sizes': torch.tensor([[336, 336]], device=self.device, dtype=torch.long),
-                'vision_feature_layer': -2,
-                'vision_feature_select_strategy': 'default',
                 'return_dict': True
             }
+
+            # Log shapes for debugging
+            logger.debug("Input shapes:")
+            for key, value in model_inputs.items():
+                if isinstance(value, torch.Tensor):
+                    logger.debug(f"  {key}: {value.shape}")
 
             # Forward pass
             device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -297,32 +309,11 @@ class CustomTrainer:
             
             if self.args.max_grad_norm > 0:
                 self.scaler.unscale_(self.optimizer)
-                try:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(),
-                        self.args.max_grad_norm,
-                        error_if_nonfinite=True
-                    )
-                except RuntimeError as e:
-                    logger.error(f"Gradient clipping failed: {e}")
-                    return None
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    self.args.max_grad_norm
+                )
 
-            # Validate gradients
-            if not self._validate_gradients(model):
-                return None
-
-            # Apply gradient clipping
-            if self.args.max_grad_norm > 0:
-                try:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(),
-                        self.args.max_grad_norm,
-                        error_if_nonfinite=True
-                    )
-                except RuntimeError as e:
-                    logger.error(f"Gradient clipping failed: {e}")
-                    return None
-                
             # Optimizer step with gradient scaling
             self.scaler.step(self.optimizer)
             self.scaler.update()

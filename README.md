@@ -1,173 +1,160 @@
-# LLaVA Plant Training Application Documentation
+# LLaVA Plant Training Application
 
 ## Project Overview
-This application fine-tunes a LLaVA-NeXT (Large Language and Vision Assistant) model on the oxford_flowers102 dataset for plant identification. The project uses a memory-efficient approach to handle image processing, model training, and dataset management.
-
-## Key Features
-- Integrated LLaVA-NeXT model support
-- Memory-efficient data processing
-- Robust error handling and logging
-- Automatic tensor shape management
-- Comprehensive image validation
-- 4-bit quantization support
+This application fine-tunes a LLaVA-NeXT (Large Language and Vision Assistant) model on the oxford_flowers102 dataset for plant identification. The project emphasizes robust error handling, comprehensive validation, and memory-efficient processing.
 
 ## Project Structure
 ```
 llava_plants/
 ├── train.py                 # Main training script
-├── test_trainer.py         # Test script for validation
+├── test_trainer.py          # Test script for validation
 ├── data/
 │   ├── __init__.py
-│   └── dataset.py          # Advanced dataset handling
+│   └── dataset.py          # Memory-efficient dataset implementation
 ├── models/
 │   ├── __init__.py
 │   └── trainer.py          # Custom trainer implementation
 ├── utils/
 │   ├── __init__.py
+│   ├── dataset_validator.py # Dataset validation and statistics
 │   ├── image_utils.py      # Image processing utilities
-│   ├── tensor_utils.py     # Tensor validation
+│   ├── tensor_utils.py     # Tensor validation and normalization
 │   ├── tokenizer_utils.py  # Tokenizer configuration
+│   ├── model_optimizer.py  # Model optimization utilities
 │   └── logging_utils.py    # Logging setup
 └── config/
     ├── __init__.py
-    └── training_config.py  # Training configuration
+    ├── base_config.py      # Base configuration classes
+    ├── model_config.py     # Model-specific settings
+    ├── training_config.py  # Training hyperparameters
+    └── data_config.py      # Dataset and processing settings
 ```
 
-## Prerequisites
+## Core Components
 
-### Hardware Requirements
-- Minimum 50GB RAM
-- GPU with at least 16GB VRAM (required)
-- Storage: 50GB free space
+### Utilities
+- **dataset_validator.py**: Pre-training dataset validation
+  - Statistical analysis of dataset
+  - Memory usage validation
+  - Class distribution analysis 
+  - Image quality checks
 
-### Software Requirements
-- Python 3.10+
-- CUDA 11.7+ (for GPU support)
-- Git LFS (for model checkpoints)
+- **tensor_utils.py**: Tensor operations and validation
+  - Shape validation
+  - NaN/Inf checking
+  - Tensor normalization
+  - Memory-efficient tensor operations
+
+- **model_optimizer.py**: Model optimization utilities
+  - Memory usage optimization
+  - Training settings optimization
+  - Mixed precision setup
+  - Batch processing optimization
+
+- **logging_utils.py**: Structured logging system
+  - Training metrics logging
+  - Error tracking
+  - Performance monitoring
+  - Checkpoint logging
+
+### Data Management
+- **dataset.py**: Memory-efficient dataset implementation
+  - Lazy loading
+  - Caching support
+  - Basic validation
+  - Memory cleanup
+
+### Model Training
+- **trainer.py**: Custom training implementation
+  - Gradient accumulation
+  - Memory-efficient training
+  - Comprehensive error handling
+  - Training state management
 
 ## Setup Instructions
 
-1. Create and activate conda environment:
+### Prerequisites
+- Python 3.10+
+- CUDA 11.7+ (for GPU support)
+- Git LFS (for model checkpoints)
+- 16GB+ RAM
+- GPU with 8GB+ VRAM (recommended)
+
+### Environment Setup
 ```bash
 conda create -n plant_vision python=3.10
 conda activate plant_vision
-```
-
-2. Install dependencies:
-```bash
 pip install -r requirements.txt
 ```
 
-3. Set environment variables:
+### Environment Variables
 ```bash
 export HUGGINGFACE_TOKEN="your_token_here"
 export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
 export TOKENIZERS_PARALLELISM=false
 ```
 
-## Pre-training Validation
+## Usage
 
-Before running full training, execute the test script:
+### Dataset Validation
+Run validation before training to ensure data quality:
+```bash
+python -m utils.dataset_validator --data_dir path/to/data
+```
+
+### Training
+Start training with custom parameters:
+```bash
+python train.py \
+  --sample_fraction 1.0 \
+  --batch_size 1 \
+  --grad_accum_steps 16 \
+  --learning_rate 1e-5
+```
+
+### Testing
+Run validation tests:
 ```bash
 python test_trainer.py
 ```
 
-Verify the following in the output:
-- Image token processing is correct (look for "Number of image tokens: 1")
-- Tensor shapes are consistent (especially pixel_values)
-- Loss value is reasonable (typically between 0.5-2.0)
-- No memory errors or leaks
+## Best Practices
 
-## Training Configuration
+### Memory Management
+- Use gradient checkpointing for large models
+- Enable 4-bit quantization
+- Monitor GPU memory usage
+- Implement proper garbage collection
 
-### Current Optimal Settings
-- Batch Size: 1
-- Gradient Accumulation Steps: 16
-- Learning Rate: 1e-5
-- Mixed Precision: fp16
-- Training Strategy: Gradient checkpointing enabled
-- Memory Optimization: 4-bit quantization
+### Training Process
+1. Validate dataset before training
+2. Start with small sample_fraction
+3. Monitor loss curves
+4. Save checkpoints regularly
 
-### Resource Management
-- GPU Memory: 90% allocation for model, 10% for buffer
-- Gradient Clipping: 0.5
-- Memory-efficient dataset loading
-- Automatic garbage collection
+### Error Handling
+- Comprehensive error logging
+- Graceful failure recovery
+- Memory cleanup on errors
+- Validation at critical points
 
 ## Common Issues and Solutions
 
-### Memory Management
-- If encountering OOM errors, increase gradient accumulation steps
-- Enable 4-bit quantization using BitsAndBytesConfig
-- Monitor GPU memory usage with `nvidia-smi`
-
-### Image Processing
-- Ensure images are correctly resized to 336x336
-- Validate patch size is consistently 14x14
-- Check for correct number of patches (576 + 1 CLS token)
+### Memory Issues
+- Increase gradient accumulation steps
+- Enable 4-bit quantization
+- Monitor GPU memory with nvidia-smi
+- Use memory-efficient dataset loading
 
 ### Training Stability
-- Monitor loss values for sudden spikes
-- Verify gradient norms remain under 1.0
-- Check attention masks for correct padding
+- Monitor loss values
+- Verify gradient norms
+- Check attention masks
+- Validate tensor shapes
 
-## Monitoring and Debugging
-
-### Key Metrics to Watch
-- Training Loss: Should decrease steadily
-- GPU Memory Usage: Should remain stable
-- Image Token Processing: Verify correct token counts
-- Gradient Norms: Should not explode
-
-### Logging
-- All major operations are logged at INFO level
-- Critical errors include full stack traces
-- Performance metrics are logged every 10 steps
-- Tensor shapes are validated at each stage
-
-## Performance Optimization Tips
-
-1. Data Loading
-   - Use appropriate sample_fraction for dataset size
-   - Enable pin_memory for GPU training
-   - Adjust num_workers based on CPU cores
-
-2. Model Configuration
-   - Enable gradient checkpointing
-   - Use 4-bit quantization
-   - Implement proper garbage collection
-   - Monitor memory usage
-
-3. Training Process
-   - Start with small sample_fraction
-   - Gradually increase batch size if stable
-   - Monitor loss curves for convergence
-   - Save checkpoints regularly
-
-## Future Improvements
-
-1. Technical Enhancements
-   - Implement dynamic batch sizing
-   - Add multi-GPU support
-   - Optimize memory management
-   - Enhance error recovery
-
-2. Features
-   - Add validation metrics
-   - Implement early stopping
-   - Add model export utilities
-   - Enhance logging visualization
-
-## Contribution Guidelines
-
-1. Code Style
-   - Follow PEP 8 guidelines
-   - Add comprehensive docstrings
-   - Include type hints
-   - Maintain extensive logging
-
-2. Testing
-   - Add unit tests for new features
-   - Run test_trainer.py before commits
-   - Validate memory usage
-   - Check tensor shapes
+## Contributing
+1. Follow PEP 8 guidelines
+2. Add comprehensive docstrings
+3. Include type hints
+4. Maintain extensive logging
+5. Run test_trainer.py before commits
